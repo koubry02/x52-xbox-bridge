@@ -1,0 +1,51 @@
+{
+  "_readme": [
+    "BATTLEFIELD 6 — aircraft (jet / helicopter), matching the game's DEFAULT",
+    "Aircraft controller scheme. Because the HOTAS gives every axis its own",
+    "control, you do NOT need the in-game 'Alternate' preset — keep Default.",
+    "",
+    "BF6 default aircraft scheme: left stick = yaw + throttle, right stick =",
+    "pitch + roll (push forward = nose down), RT = fire, LT = zoom,",
+    "LS click = afterburner, RS click = camera, Y = switch weapon,",
+    "X = reload / hold to exit, A = switch seat, d-pad = equipment slots",
+    "(countermeasures etc.).",
+    "",
+    "So here: THROTTLE LEVER -> left stick Y (up = throttle up). TWIST ->",
+    "left stick X (yaw). Main stick -> right stick (X = roll, Y = pitch,",
+    "push forward = nose down). Trigger = fire (RT). Pinkie = zoom (LT).",
+    "I = afterburner (LS). A head = camera (RS). C head = switch weapon (Y).",
+    "B head = reload / hold to exit (X). D = switch seat (A). Thumb FIRE =",
+    "B. POV hat = equipment slots. T1 = pause menu, T3 = scoreboard."
+  ],
+  "display_name": "Battlefield 6",
+  "short_name": "BF6",
+  "inherits": "default",
+  "order": 30,
+  "axes": {
+    "ABS_X":  { "target": "rx" },
+    "ABS_RZ": { "target": "lx" }
+  },
+  "buttons": {
+    "mode1": {
+      "BTN_THUMB": "b",
+      "BTN_PINKIE": "lt_button",
+      "BTN_TOP2": "y",
+      "BTN_TOP": "x",
+      "BTN_BASE": "a"
+    },
+    "mode2": {
+      "BTN_THUMB": "b",
+      "BTN_PINKIE": "lt_button",
+      "BTN_TOP2": "y",
+      "BTN_TOP": "x",
+      "BTN_BASE": "a"
+    },
+    "mode3": {
+      "BTN_THUMB": "b",
+      "BTN_PINKIE": "lt_button",
+      "BTN_TOP2": "y",
+      "BTN_TOP": "x",
+      "BTN_BASE": "a"
+    }
+  }
+}

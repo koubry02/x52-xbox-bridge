@@ -11,6 +11,16 @@ Install Oberon Remote on your Xbox first:
   Microsoft Store -> search "Oberon Remote Input" (developer: SamsidParty)
   Direct link: https://apps.microsoft.com/detail/9pk5stjzff3s
 
+GAME LAYOUTS
+  Mappings live as JSON files in the layouts/ directory (with inheritance —
+  see layouts.py). The layout_switch_button (default: T2 rocker) cycles
+  through them live; the active game shows on the X52 Pro's throttle screen
+  and in the web UI. The built-in web app (default port 8088) lets you view
+  status and create/edit layouts from any browser on the LAN.
+
+  Legacy mode: pass --config <file> to run one fixed config the old way
+  (no layout switching), e.g. a calibrated sender_config.json.
+
 Protocol (reverse-engineered from OberonRemote open-source):
   On connect  server -> client: [0x0A] + hostname bytes   (handshake)
   Poll        client -> server: [0xFA] (optionally + 16 rumble bytes, ignored)
@@ -30,7 +40,8 @@ Buffer layout (4 controller slots x 25 bytes each):
     bytes 15-24: zero
 
 Usage:
-    sudo python3 oberon_server.py                    # uses default config
+    sudo python3 oberon_server.py                    # layouts mode (default)
+    sudo python3 oberon_server.py --layout ac7       # start on a given layout
     sudo python3 oberon_server.py --config /path/to/sender_config.json
     sudo python3 oberon_server.py --list             # show input devices
     sudo python3 oberon_server.py --probe            # live event names
@@ -54,9 +65,14 @@ except ImportError:
 
 try:
     import websockets
-    from websockets.server import serve as ws_serve
+    try:
+        from websockets.asyncio.server import serve as ws_serve   # websockets >= 13
+    except ImportError:
+        from websockets.server import serve as ws_serve           # older versions
 except ImportError:
     sys.exit("websockets missing.  Run: pip3 install --break-system-packages websockets")
+
+import layouts as layouts_mod
 
 # Optional X52 Pro MFD status display (libx52). Silent no-op if not installed.
 try:
@@ -65,7 +81,9 @@ except ImportError:
     mfd_mod = None
 
 PORT          = 26401
+WEB_PORT      = 8088
 AXIS_TARGETS  = ("lx", "ly", "rx", "ry", "lt", "rt")
+SPLIT_TARGET  = "split_lt_rt"
 
 def neutral_axes():
     """Resting values: sticks centre at 0.0, TRIGGERS release at -1.0.
@@ -163,6 +181,61 @@ def build_packet(axes, g1, g2):
     return bytes(buf)
 
 
+# ─── Status hub (shared with the MFD and the web app) ────────────────────────
+
+class StatusHub:
+    """Thread-safe live status: what the web UI and MFD show."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._d = {
+            "ip": "", "device": "", "connected": False, "ping_ms": None,
+            "menu": False, "layout": None, "layout_display": None,
+            "layout_short": None, "legacy_config": None,
+            "started": time.time(),
+        }
+
+    def set(self, **kw):
+        with self._lock:
+            self._d.update(kw)
+
+    def snapshot(self):
+        with self._lock:
+            d = dict(self._d)
+        d["uptime_s"] = int(time.time() - d.pop("started"))
+        return d
+
+
+class Telemetry:
+    """Fans status updates out to the StatusHub and (if present) the MFD."""
+
+    def __init__(self, hub, mfd=None):
+        self.hub = hub
+        self.mfd = mfd
+
+    def set_connected(self, on):
+        self.hub.set(connected=on, **({} if on else {"ping_ms": None}))
+        if self.mfd: self.mfd.set_connected(on)
+
+    def set_ping(self, ms):
+        self.hub.set(ping_ms=round(ms, 1))
+        if self.mfd: self.mfd.set_ping(ms)
+
+    def set_menu(self, on):
+        self.hub.set(menu=on)
+        if self.mfd: self.mfd.set_menu(on)
+
+    def set_game(self, name, short, display):
+        self.hub.set(layout=name, layout_short=short, layout_display=display)
+        if self.mfd: self.mfd.set_game(short)
+
+    def set_mfd_brightness(self, lvl):
+        if self.mfd: self.mfd.set_mfd_brightness(lvl)
+
+    def set_led_brightness(self, lvl):
+        if self.mfd: self.mfd.set_led_brightness(lvl)
+
+
 # ─── Thread-safe HOTAS state ─────────────────────────────────────────────────
 
 class HOTASState:
@@ -180,9 +253,17 @@ class HOTASState:
             self._g1   = g1
             self._g2   = g2
 
+    def set_throttle_targets(self, targets):
+        with self._lock:
+            self._throttle_targets = tuple(targets)
+
     def set_suspended(self, value):
         with self._lock:
             self._suspended = bool(value)
+
+    def is_suspended(self):
+        with self._lock:
+            return self._suspended
 
     def toggle_suspended(self):
         with self._lock:
@@ -201,56 +282,245 @@ class HOTASState:
             return axes, self._g1, self._g2
 
 
+# ─── Layout compilation ───────────────────────────────────────────────────────
+
+def resolve_button_targets(target):
+    """A button target (string or list) -> ([(grp, mask), ...], [lt/rt, ...]).
+    Unknown names are reported by the caller; select_mode is handled there."""
+    bits, trigs = [], []
+    for t in (target if isinstance(target, list) else [target]):
+        if t in OBERON_BTNS:
+            bits.append(OBERON_BTNS[t])
+        elif t in TRIGGER_BTNS:
+            trigs.append(TRIGGER_BTNS[t])
+        else:
+            return None
+    return bits, trigs
+
+
+class Mappings:
+    """One layout compiled against the actual device's capabilities."""
+
+    def __init__(self, cfg, absinfo, quiet=False):
+        self.cfg  = cfg
+        self.name = cfg.get("name", "config")
+        self.short_name   = cfg.get("short_name", self.name.upper()[:8])
+        self.display_name = cfg.get("display_name", self.name)
+
+        def log(msg):
+            if not quiet:
+                print(msg)
+
+        # Axes: code -> (target-or-None, acfg, absinfo)
+        self.axis_cfg = {}
+        # Axis-driven buttons: code -> (low_resolved, high_resolved, threshold)
+        self.axis_btns = {}
+        self.throttle_targets = ()
+        throttle_name = cfg.get("throttle_axis", "ABS_Z")
+        for name, acfg in cfg.get("axes", {}).items():
+            code = ecodes.ecodes.get(name)
+            if code is None or code not in absinfo:
+                log(f"  [!] axis {name} not on this device, skipped")
+                continue
+            tgt = acfg.get("target")
+            if tgt is not None and tgt not in AXIS_TARGETS and tgt != SPLIT_TARGET:
+                log(f"  [!] axis {name}: unknown target '{tgt}', skipped")
+                tgt = None
+            low, high = acfg.get("button_low"), acfg.get("button_high")
+            if low or high:
+                lr = resolve_button_targets(low)  if low  else ([], [])
+                hr = resolve_button_targets(high) if high else ([], [])
+                if lr is None or hr is None:
+                    log(f"  [!] axis {name}: bad button_low/high, skipped")
+                else:
+                    thr = acfg.get("button_threshold", 0.5)
+                    self.axis_btns[code] = (lr, hr, thr)
+            if tgt is not None or code in self.axis_btns:
+                self.axis_cfg[code] = (tgt, acfg, absinfo[code])
+            if name == throttle_name:
+                if tgt == SPLIT_TARGET:
+                    self.throttle_targets = ("lt", "rt")
+                elif tgt in AXIS_TARGETS:
+                    self.throttle_targets = (tgt,)
+        if not self.throttle_targets:
+            self.throttle_targets = ("ly",)
+
+        # Buttons: (mode, code) -> ([(grp,mask), ...], [lt/rt, ...])
+        self.mode_sel   = {}
+        self.button_cfg = {}
+        for mode_name, bmap in cfg.get("buttons", {}).items():
+            try:
+                mode = int(mode_name.replace("mode", "") or 0)
+            except ValueError:
+                log(f"  [!] bad mode key '{mode_name}', skipped")
+                continue
+            for name, target in bmap.items():
+                code = ecodes.ecodes.get(name)
+                if code is None:
+                    log(f"  [!] button code '{name}' unknown, skipped")
+                    continue
+                if isinstance(target, str) and target.startswith("select_mode"):
+                    self.mode_sel[code] = int(target[-1])
+                    continue
+                resolved = resolve_button_targets(target)
+                if resolved is None:
+                    log(f"  [!] button '{name}': unknown target '{target}', skipped")
+                else:
+                    self.button_cfg[(mode, code)] = resolved
+
+        self.hat_dpad = cfg.get("hat_to_dpad", True)
+
+        def keycode(key):
+            n = cfg.get(key)
+            if not n:
+                return None
+            c = ecodes.ecodes.get(n)
+            if c is None:
+                log(f"  [!] {key} '{n}' unknown, ignored")
+            return c
+
+        self.suspend_code = keycode("suspend_button")
+        self.switch_code  = keycode("layout_switch_button")
+
+        # Brightness rotaries: only active when NOT already mapped as an axis.
+        self.brightness = self._rotary(cfg, "brightness_axis", "ABS_RY", absinfo)
+        self.led_brightness = self._rotary(cfg, "led_brightness_axis", "ABS_RX", absinfo)
+
+    def _rotary(self, cfg, key, default, absinfo):
+        name = cfg.get(key, default)
+        if not name:
+            return None
+        code = ecodes.ecodes.get(name)
+        if code is not None and code in absinfo and code not in self.axis_cfg:
+            return (code, absinfo[code])
+        return None
+
+
+# ─── Layout manager (live switching) ─────────────────────────────────────────
+
+class LayoutManager:
+    """Holds the compiled active layout (.m) and swaps it atomically.
+    The evdev reader picks up the new object and resets its local state."""
+
+    def __init__(self, layouts_dir, absinfo, state, telemetry):
+        self.layouts_dir = layouts_dir      # None = legacy single-config mode
+        self.absinfo     = absinfo
+        self.state       = state
+        self.telemetry   = telemetry
+        self._lock       = threading.Lock()
+        self.m           = None             # current Mappings (read atomically)
+
+    def set_legacy(self, cfg):
+        m = Mappings(cfg, self.absinfo)
+        self._apply(m, persist=False)
+        return m
+
+    def activate(self, name, persist=True, quiet=True):
+        """Compile and switch to layout `name`. Returns (ok, error_str)."""
+        if not self.layouts_dir:
+            return False, "running in legacy --config mode; no layouts dir"
+        try:
+            cfg = layouts_mod.resolve(self.layouts_dir, name)
+            m = Mappings(cfg, self.absinfo, quiet=quiet)
+        except (OSError, ValueError, json.JSONDecodeError) as e:
+            return False, f"layout '{name}': {e}"
+        self._apply(m, persist=persist)
+        print(f"[layout] active: {m.display_name} ({name})", flush=True)
+        return True, None
+
+    def cycle(self):
+        """Switch to the next layout in order (the HOTAS switch button)."""
+        if not self.layouts_dir:
+            return
+        order = layouts_mod.cycle_order(self.layouts_dir)
+        if not order:
+            return
+        cur = self.m.name if self.m else None
+        idx = (order.index(cur) + 1) % len(order) if cur in order else 0
+        ok, err = self.activate(order[idx])
+        if not ok:
+            print(f"[layout] switch failed: {err}", flush=True)
+
+    def _apply(self, m, persist):
+        with self._lock:
+            self.m = m
+        # Publish neutral right away so the old layout's last values can't
+        # linger until the next stick event (the reader also resets itself).
+        self.state.update(neutral_axes(), 0, 0)
+        self.state.set_throttle_targets(m.throttle_targets)
+        self.telemetry.set_game(m.name, m.short_name, m.display_name)
+        if persist and self.layouts_dir:
+            layouts_mod.write_active(self.layouts_dir, m.name)
+
+
 # ─── evdev reader (runs in daemon thread) ────────────────────────────────────
 
-def evdev_reader(dev, axis_cfg, mode_sel, button_cfg, trigger_btn_cfg,
-                 hat_dpad, state, suspend_code=None, start_suspended=False,
-                 throttle_targets=("ly",), mfd=None,
-                 brightness_code=None, brightness_info=None,
-                 led_bri_code=None, led_bri_info=None):
-    axes    = neutral_axes()
-    pressed = set()
-    hat     = [0, 0]
-    mode    = 1
-    suspended = start_suspended   # when True, all axes report neutral (menu nav)
+def evdev_reader(dev, mgr, state, telemetry, verbose=False):
+    m = None                    # current Mappings; reset state when it changes
+    axes = pressed = hat = axis_st = None
+    mode = 1
+    _last_bri = -1
+    _last_led_bri = -1
+
+    def reset_local():
+        nonlocal axes, pressed, hat, axis_st, mode
+        axes    = neutral_axes()
+        pressed = set()
+        hat     = [0, 0]
+        axis_st = {}            # axis code -> -1 / 0 / +1 (axis-driven buttons)
+        mode    = 1
+
+    reset_local()
 
     while True:
         try:
-            _last_bri = [-1]        # last MFD brightness sent (throttle x52cli spam)
-            _last_led_bri = [-1]    # last LED brightness sent
             for ev in dev.read_loop():
+                if mgr.m is not m:              # layout switched (button or web)
+                    m = mgr.m
+                    reset_local()
+                    state.update(axes, 0, 0)    # publish neutral immediately
+
                 if ev.type == ecodes.EV_ABS:
-                    if ev.code in axis_cfg:
-                        tgt, acfg, info = axis_cfg[ev.code]
-                        axes[tgt] = shape(ev.value, info, acfg)
-                    elif mfd and brightness_code is not None and ev.code == brightness_code:
-                        # Throttle rotary (ABS_RY) -> live MFD brightness 0..128.
-                        info = brightness_info
+                    if ev.code in m.axis_cfg:
+                        tgt, acfg, info = m.axis_cfg[ev.code]
+                        v = shape(ev.value, info, acfg)
+                        if tgt == SPLIT_TARGET:
+                            # forward half -> RT, back half -> LT (0 at centre)
+                            axes["rt"] = (v * 2.0 - 1.0) if v > 0 else -1.0
+                            axes["lt"] = (-v * 2.0 - 1.0) if v < 0 else -1.0
+                        elif tgt is not None:
+                            axes[tgt] = v
+                        if ev.code in m.axis_btns:
+                            _, _, thr = m.axis_btns[ev.code]
+                            axis_st[ev.code] = (-1 if v < -thr else
+                                                 1 if v > thr else 0)
+                    elif m.brightness and ev.code == m.brightness[0]:
+                        # Throttle rotary -> live MFD brightness 0..128.
+                        info = m.brightness[1]
                         span = (info.max - info.min) or 1
                         lvl = max(0, min(128, int((ev.value - info.min) / span * 128)))
-                        if lvl != _last_bri[0]:
-                            _last_bri[0] = lvl
-                            mfd.set_mfd_brightness(lvl)
-                    elif mfd and led_bri_code is not None and ev.code == led_bri_code:
-                        # Throttle rotary (ABS_RX) -> live button-LED brightness 0..128.
-                        info = led_bri_info
+                        if lvl != _last_bri:
+                            _last_bri = lvl
+                            telemetry.set_mfd_brightness(lvl)
+                    elif m.led_brightness and ev.code == m.led_brightness[0]:
+                        # Second rotary -> live button-LED brightness 0..128.
+                        info = m.led_brightness[1]
                         span = (info.max - info.min) or 1
                         lvl = max(0, min(128, int((ev.value - info.min) / span * 128)))
-                        if lvl != _last_led_bri[0]:
-                            _last_led_bri[0] = lvl
-                            mfd.set_led_brightness(lvl)
-                    elif hat_dpad and ev.code == ecodes.ABS_HAT0X:
+                        if lvl != _last_led_bri:
+                            _last_led_bri = lvl
+                            telemetry.set_led_brightness(lvl)
+                    elif m.hat_dpad and ev.code == ecodes.ABS_HAT0X:
                         hat[0] = ev.value
-                    elif hat_dpad and ev.code == ecodes.ABS_HAT0Y:
+                    elif m.hat_dpad and ev.code == ecodes.ABS_HAT0Y:
                         hat[1] = ev.value
 
                 elif ev.type == ecodes.EV_KEY:
-                    if suspend_code is not None and ev.code == suspend_code and ev.value == 1:
-                        suspended = state.toggle_suspended()   # shared, applied at poll time
+                    if m.suspend_code is not None and ev.code == m.suspend_code and ev.value == 1:
+                        suspended = state.toggle_suspended()   # applied at poll time
                         print(f"[menu] {'THROTTLE FROZEN (menu/radial safe)' if suspended else 'LIVE (flying)'}",
                               flush=True)
-                        if mfd:
-                            mfd.set_menu(suspended)
+                        telemetry.set_menu(suspended)
                         if not suspended:
                             # Resuming: drop any buttons currently held (the pinkie
                             # itself, plus anything touched during menu nav) so the
@@ -258,8 +528,11 @@ def evdev_reader(dev, axis_cfg, mode_sel, button_cfg, trigger_btn_cfg,
                             # inputs (fire, ping, etc.). They re-register on the
                             # next real press.
                             pressed.clear()
-                    elif ev.code in mode_sel and ev.value:
-                        new_mode = mode_sel[ev.code]
+                    elif m.switch_code is not None and ev.code == m.switch_code and ev.value == 1:
+                        mgr.cycle()     # picked up at the top of the next event
+                        continue
+                    elif ev.code in m.mode_sel and ev.value:
+                        new_mode = m.mode_sel[ev.code]
                         if new_mode != mode:
                             mode = new_mode
                             print(f"[mode] switched to M{mode}", flush=True)
@@ -275,15 +548,25 @@ def evdev_reader(dev, axis_cfg, mode_sel, button_cfg, trigger_btn_cfg,
                 g1, g2 = 0, 0
                 trig_hold = {"lt": False, "rt": False}
 
-                for code in pressed:
-                    binfo = button_cfg.get((mode, code))
-                    if binfo:
-                        grp, mask = binfo
+                def press(resolved):
+                    nonlocal g1, g2
+                    bits, trigs = resolved
+                    for grp, mask in bits:
                         if grp == 1: g1 |= mask
                         else:        g2 |= mask
-                    tb = trigger_btn_cfg.get((mode, code))
-                    if tb:
-                        trig_hold[tb] = True
+                    for t in trigs:
+                        trig_hold[t] = True
+
+                for code in pressed:
+                    resolved = m.button_cfg.get((mode, code))
+                    if resolved:
+                        press(resolved)
+
+                # Axis-driven buttons (e.g. twist past the threshold = LB/RB)
+                for code, st in axis_st.items():
+                    if st:
+                        low, high, _ = m.axis_btns[code]
+                        press(low if st < 0 else high)
 
                 # POV hats report -1/0/+1. Require a full ±1 before emitting a
                 # d-pad direction so a hat resting slightly off-neutral can
@@ -308,7 +591,7 @@ def evdev_reader(dev, axis_cfg, mode_sel, button_cfg, trigger_btn_cfg,
 
 # ─── WebSocket server ─────────────────────────────────────────────────────────
 
-def make_handler(state, verbose, mfd=None):
+def make_handler(state, verbose, telemetry):
     hostname = socket.gethostname()
     handshake = bytes([0x0A]) + hostname.encode("utf-8")
 
@@ -316,8 +599,7 @@ def make_handler(state, verbose, mfd=None):
         addr = websocket.remote_address
         print(f"[oberon] connected from {addr[0]}")
         await websocket.send(handshake)
-        if mfd:
-            mfd.set_connected(True)
+        telemetry.set_connected(True)
 
         # Smoothed poll interval -> shown on the MFD as "ping" (round-trip
         # cadence of the Oberon client's polls, in ms).
@@ -336,8 +618,7 @@ def make_handler(state, verbose, mfd=None):
                 last_poll = now
                 if 0 < dt < 1000:
                     ema = dt if ema is None else (0.8 * ema + 0.2 * dt)
-                    if mfd:
-                        mfd.set_ping(ema)
+                    telemetry.set_ping(ema)
 
                 axes, g1, g2 = state.snapshot()
                 pkt = build_packet(axes, g1, g2)
@@ -352,8 +633,7 @@ def make_handler(state, verbose, mfd=None):
 
         except websockets.exceptions.ConnectionClosed:
             pass
-        if mfd:
-            mfd.set_connected(False)
+        telemetry.set_connected(False)
         print(f"[oberon] disconnected from {addr[0]}")
 
     return handler
@@ -363,10 +643,15 @@ def make_handler(state, verbose, mfd=None):
 
 def main():
     ap = argparse.ArgumentParser(description="Oberon Remote WebSocket server for Saitek X52")
-    ap.add_argument("--config",  default=os.path.join(os.path.dirname(__file__),
-                                                       "../sender/sender_config.json"))
+    ap.add_argument("--config",  help="legacy single-config mode: run this one "
+                                      "JSON config with layout switching off")
+    ap.add_argument("--layouts-dir", default=layouts_mod.default_dir(),
+                    help="directory of layout JSONs (default: ../layouts)")
+    ap.add_argument("--layout",  help="layout to start on (default: last active)")
     ap.add_argument("--device",  help="/dev/input/eventX path")
     ap.add_argument("--port",    type=int, default=PORT)
+    ap.add_argument("--web-port", type=int, default=None,
+                    help=f"status/editor web app port (default {WEB_PORT}, 0 = off)")
     ap.add_argument("--list",    action="store_true", help="list input devices and exit")
     ap.add_argument("--probe",   action="store_true", help="print live events and exit")
     ap.add_argument("--verbose", action="store_true")
@@ -384,13 +669,31 @@ def main():
                 pass
         return
 
-    with open(args.config) as f:
-        cfg = json.load(f)
+    # Decide the mode: explicit --config = legacy; otherwise layouts dir.
+    legacy_cfg = None
+    layouts_dir = None
+    if args.config:
+        with open(args.config) as f:
+            legacy_cfg = json.load(f)
+        print(f"[layout] legacy mode: fixed config {args.config}")
+    elif os.path.isdir(args.layouts_dir) and layouts_mod.list_layouts(args.layouts_dir):
+        layouts_dir = os.path.abspath(args.layouts_dir)
+        print(f"[layout] layouts dir: {layouts_dir}")
+    else:
+        sys.exit(f"No layouts found in {args.layouts_dir} and no --config given.")
+
+    base_cfg = legacy_cfg
+    if layouts_dir:
+        start = args.layout or layouts_mod.read_active(layouts_dir)
+        try:
+            base_cfg = layouts_mod.resolve(layouts_dir, start)
+        except Exception as e:
+            sys.exit(f"Cannot load layout '{start}': {e}")
 
     dev = InputDevice(args.device) if args.device \
-        else find_device(cfg.get("device_match", "X52"))
+        else find_device(base_cfg.get("device_match", "X52"))
     if dev is None:
-        sys.exit(f"No device matching '{cfg.get('device_match')}'. "
+        sys.exit(f"No device matching '{base_cfg.get('device_match')}'. "
                  f"Run --list, then re-run with --device /dev/input/eventX")
     print(f"[evdev]  {dev.path}  {dev.name}")
 
@@ -401,87 +704,12 @@ def main():
                 print(f"{code_name(ev.type, ev.code):28s}  value={ev.value}")
         return
 
-    # Build axis config
-    absinfo  = dict(dev.capabilities().get(ecodes.EV_ABS, []))
-    axis_cfg = {}
-    for name, acfg in cfg.get("axes", {}).items():
-        code = ecodes.ecodes.get(name)
-        if code is None or code not in absinfo:
-            print(f"  [!] axis {name} not on this device, skipped")
-            continue
-        if acfg["target"] not in AXIS_TARGETS:
-            sys.exit(f"axis {name}: unknown target '{acfg['target']}'")
-        axis_cfg[code] = (acfg["target"], acfg, absinfo[code])
+    absinfo = dict(dev.capabilities().get(ecodes.EV_ABS, []))
+    dev.grab()   # exclusive: nothing else on this board consumes the stick
 
-    # Which axis target is the throttle? Convention: ABS_Z is the throttle lever.
-    # The suspend button freezes ONLY this axis, leaving the flight sticks live.
-    # Override in config with "throttle_axis": "<evdev name>" if yours differs.
-    throttle_name = cfg.get("throttle_axis", "ABS_Z")
-    throttle_targets = tuple(
-        acfg["target"] for name, acfg in cfg.get("axes", {}).items()
-        if name == throttle_name and acfg["target"] in AXIS_TARGETS
-    ) or ("ly",)
-
-    # Optional: a spare throttle rotary controls MFD brightness live. Default is
-    # ABS_RY; override with "brightness_axis" in config, or set it to null/"" to
-    # disable. Only active when it's NOT already mapped as a game axis.
-    brightness_code = None
-    brightness_info = None
-    bri_name = cfg.get("brightness_axis", "ABS_RY")
-    if bri_name:
-        bc = ecodes.ecodes.get(bri_name)
-        if bc is not None and bc in absinfo and bc not in axis_cfg:
-            brightness_code = bc
-            brightness_info = absinfo[bc]
-
-    # Second rotary controls the button-LED brightness (default ABS_RX).
-    led_bri_code = None
-    led_bri_info = None
-    led_name = cfg.get("led_brightness_axis", "ABS_RX")
-    if led_name:
-        lc = ecodes.ecodes.get(led_name)
-        if lc is not None and lc in absinfo and lc not in axis_cfg:
-            led_bri_code = lc
-            led_bri_info = absinfo[lc]
-
-    # Build button config
-    mode_sel        = {}
-    button_cfg      = {}
-    trigger_btn_cfg = {}
-    for mode_name, bmap in cfg.get("buttons", {}).items():
-        mode = int(mode_name.replace("mode", "") or 0)
-        for name, target in bmap.items():
-            code = ecodes.ecodes.get(name)
-            if code is None:
-                print(f"  [!] button code '{name}' unknown, skipped")
-                continue
-            if target.startswith("select_mode"):
-                mode_sel[code] = int(target[-1])
-            elif target in OBERON_BTNS:
-                button_cfg[(mode, code)] = OBERON_BTNS[target]
-            elif target in TRIGGER_BTNS:
-                trigger_btn_cfg[(mode, code)] = TRIGGER_BTNS[target]
-            else:
-                print(f"  [!] button '{name}': unknown target '{target}', skipped")
-
-    dev.grab()
-
-    # Optional: a button that toggles axis-suspend (freezes throttle/sticks so
-    # they can't scroll the Xbox dashboard). Set "suspend_button" in the config
-    # to an evdev button name, e.g. "BTN_PINKIE".
-    suspend_code = None
-    sb = cfg.get("suspend_button")
-    if sb:
-        suspend_code = ecodes.ecodes.get(sb)
-        if suspend_code is None:
-            print(f"  [!] suspend_button '{sb}' unknown, ignored")
-        else:
-            print(f"  Menu-suspend toggle: press {sb} to freeze/unfreeze axes")
-
-    if args.menu and suspend_code is None:
+    if args.menu and not base_cfg.get("suspend_button"):
         print("  [!] --menu set but no working suspend_button — you won't be able\n"
-              "      to UNFREEZE. Set suspend_button in the config first.")
-
+              "      to UNFREEZE. Set suspend_button in the layout first.")
     if args.menu:
         print("  Starting SUSPENDED (menu-safe). Axes are frozen; navigate the\n"
               "  dashboard, launch your game, then press the suspend button once.")
@@ -502,19 +730,50 @@ def main():
         mfd.set_menu(args.menu)
         print("[oberon] MFD status display: ON (libx52 detected)")
 
-    state = HOTASState(throttle_targets)
+    hub = StatusHub()
+    hub.set(ip=local_ip, device=dev.name, menu=args.menu,
+            legacy_config=args.config)
+    telemetry = Telemetry(hub, mfd)
+
+    state = HOTASState()
     state.set_suspended(args.menu)   # --menu starts with the throttle frozen
+
+    mgr = LayoutManager(layouts_dir, absinfo, state, telemetry)
+    if layouts_dir:
+        ok, err = mgr.activate(base_cfg["name"], persist=True, quiet=False)
+        if not ok:
+            sys.exit(err)
+        m = mgr.m
+        if m.switch_code is not None:
+            print(f"  Layout switch: press {base_cfg.get('layout_switch_button')} "
+                  f"to cycle {', '.join(layouts_mod.cycle_order(layouts_dir))}")
+    else:
+        mgr.set_legacy(legacy_cfg)
+
+    if mgr.m.suspend_code is not None:
+        print(f"  Menu-suspend toggle: press {mgr.m.cfg.get('suspend_button')} "
+              f"to freeze/unfreeze the throttle")
+
     threading.Thread(
         target=evdev_reader,
-        args=(dev, axis_cfg, mode_sel, button_cfg, trigger_btn_cfg,
-              cfg.get("hat_to_dpad", True), state, suspend_code, args.menu,
-              throttle_targets, mfd, brightness_code, brightness_info,
-              led_bri_code, led_bri_info),
+        args=(dev, mgr, state, telemetry, args.verbose),
         daemon=True
     ).start()
 
+    # Web app: live status + layout editor for any browser on the LAN.
+    web_port = args.web_port
+    if web_port is None:
+        web_port = mgr.m.cfg.get("web_port", WEB_PORT)
+    if web_port:
+        try:
+            import webapp
+            webapp.start(web_port, hub, mgr, state, telemetry)
+            print(f"[web]    layout editor + status: http://{local_ip}:{web_port}")
+        except Exception as e:
+            print(f"[web]    disabled ({e})")
+
     async def run():
-        handler = make_handler(state, args.verbose, mfd)
+        handler = make_handler(state, args.verbose, telemetry)
         async with ws_serve(handler, "0.0.0.0", args.port):
             print(f"[oberon] WebSocket server on port {args.port}")
             print(f"[oberon] Board IP : {local_ip}")

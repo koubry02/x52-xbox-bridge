@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HOTAS Bridge</title>
+<style>
+  :root {
+    --bg: #0f1216; --panel: #171c22; --panel2: #1e252d; --line: #2a333d;
+    --txt: #d7dee6; --dim: #8b98a5; --acc: #4db6ac; --amber: #ffb74d;
+    --red: #e57373; --green: #81c784;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--txt);
+         font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display: flex; align-items: baseline; gap: 12px; padding: 14px 20px;
+           background: var(--panel); border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 18px; margin: 0; letter-spacing: .04em; }
+  header .ip { color: var(--dim); font-family: ui-monospace, monospace; }
+  main { max-width: 1100px; margin: 0 auto; padding: 18px 20px 60px; }
+  h2 { font-size: 14px; text-transform: uppercase; letter-spacing: .1em;
+       color: var(--dim); margin: 26px 0 10px; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px,1fr)); gap: 10px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+          padding: 12px 14px; }
+  .card .k { color: var(--dim); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; }
+  .card .v { font-size: 20px; margin-top: 4px; font-family: ui-monospace, monospace; }
+  .ok  { color: var(--green); } .warn { color: var(--amber); } .bad { color: var(--red); }
+  button { background: var(--panel2); color: var(--txt); border: 1px solid var(--line);
+           border-radius: 8px; padding: 7px 14px; cursor: pointer; font: inherit; }
+  button:hover { border-color: var(--acc); }
+  button.primary { background: var(--acc); color: #08211f; border-color: var(--acc); font-weight: 600; }
+  button.danger:hover { border-color: var(--red); color: var(--red); }
+  button.small { padding: 3px 9px; font-size: 13px; }
+  .laylist { display: flex; flex-direction: column; gap: 8px; }
+  .lay { display: flex; align-items: center; gap: 12px; background: var(--panel);
+         border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; }
+  .lay.active { border-color: var(--acc); box-shadow: 0 0 0 1px var(--acc); }
+  .lay .nm { font-weight: 600; min-width: 110px; }
+  .lay .meta { color: var(--dim); font-size: 13px; flex: 1; }
+  .lay .badge { font-size: 11px; background: var(--acc); color: #08211f;
+                border-radius: 20px; padding: 2px 10px; font-weight: 700; }
+  #editor { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+            padding: 16px; margin-top: 14px; display: none; }
+  #editor.open { display: block; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; align-items: center; }
+  label { color: var(--dim); font-size: 13px; }
+  input, select, textarea { background: var(--panel2); color: var(--txt);
+        border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; font: inherit; }
+  input:focus, select:focus, textarea:focus { outline: 1px solid var(--acc); }
+  input.sm { width: 70px; } input.md { width: 130px; } input.lg { width: 200px; }
+  /* evdev button names run long (BTN_TRIGGER_HAPPY15) — don't clip them */
+  input.b-code { width: 240px; }
+  table { border-collapse: collapse; width: 100%; margin-bottom: 8px; }
+  th { text-align: left; color: var(--dim); font-size: 12px; font-weight: 500;
+       padding: 4px 6px; border-bottom: 1px solid var(--line); }
+  td { padding: 4px 6px; }
+  .tabs { display: flex; gap: 6px; margin: 8px 0; }
+  .tabs button.on { background: var(--acc); color: #08211f; font-weight: 600; }
+  textarea#rawjson { width: 100%; min-height: 320px; font-family: ui-monospace, monospace;
+                     font-size: 13px; display: none; }
+  #problems { color: var(--red); white-space: pre-wrap; font-size: 13px; margin: 8px 0; }
+  #savemsg { color: var(--green); font-size: 13px; }
+  .hint { color: var(--dim); font-size: 13px; margin: 6px 0 12px; }
+  code { background: var(--panel2); border-radius: 4px; padding: 1px 5px;
+         font-size: 13px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>HOTAS BRIDGE</h1>
+  <span class="ip" id="hip">—</span>
+  <span class="ip" id="hdev" style="margin-left:auto"></span>
+</header>
+<main>
+  <h2>Status</h2>
+  <div class="cards">
+    <div class="card"><div class="k">Xbox</div><div class="v" id="st-xbox">—</div></div>
+    <div class="card"><div class="k">Poll ping</div><div class="v" id="st-ping">—</div></div>
+    <div class="card"><div class="k">Menu mode</div>
+      <div class="v" id="st-menu">—</div>
+      <div style="margin-top:8px"><button class="small" id="menubtn">toggle</button></div></div>
+    <div class="card"><div class="k">Active layout</div><div class="v" id="st-layout">—</div></div>
+    <div class="card"><div class="k">Uptime</div><div class="v" id="st-up">—</div></div>
+  </div>
+
+  <h2>Game layouts</h2>
+  <div class="hint">Press the layout-switch button on the throttle (default
+    <code>BTN_BASE4</code>, the lower half of the first T-rocker) to cycle these
+    in order — or activate one here. The active game shows on the throttle
+    screen as its short name.</div>
+  <div class="laylist" id="laylist"></div>
+  <div class="row" style="margin-top:10px">
+    <button id="newbtn">+ New layout</button>
+  </div>
+
+  <div id="editor">
+    <div class="row" style="justify-content:space-between">
+      <strong id="ed-title">edit</strong>
+      <div class="row" style="margin:0">
+        <button class="small" id="rawtoggle">raw JSON</button>
+        <button class="small" id="ed-close">close</button>
+      </div>
+    </div>
+    <div id="formview">
+      <div class="row">
+        <label>display name <input class="lg" id="f-display"></label>
+        <label>MFD name (≤8) <input class="sm" id="f-short" maxlength="8"></label>
+        <label>inherits <select id="f-inherits"></select></label>
+        <label>cycle order <input class="sm" id="f-order" type="number"></label>
+      </div>
+      <div class="hint">Only what you set here overrides the inherited layout.
+        Leave a field/row out to inherit it. Values shown greyed in the
+        resolved preview come from the parent.</div>
+
+      <h2>Axes</h2>
+      <table id="axtable">
+        <thead><tr><th>evdev axis</th><th>target</th><th>invert</th><th>deadzone</th>
+          <th>expo</th><th>button low</th><th>button high</th><th>threshold</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <button class="small" id="addax">+ axis</button>
+      <div class="hint">target <code>split_lt_rt</code> = forward half of the
+        axis → RT, back half → LT (AC7-style throttle). <code>button low/high</code>
+        press an Xbox button when the axis passes ±threshold (e.g. twist → LB/RB).</div>
+
+      <h2>Buttons</h2>
+      <div class="tabs" id="modetabs">
+        <button data-m="mode1" class="on">mode 1</button>
+        <button data-m="mode2">mode 2</button>
+        <button data-m="mode3">mode 3</button>
+      </div>
+      <table id="btable">
+        <thead><tr><th>evdev button</th><th>target(s), comma for several</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <button class="small" id="addbtn">+ button</button>
+      <div class="hint">Targets: <span id="targethint"></span>.
+        Several at once: <code>ls, rs</code> (e.g. AC7 flares).</div>
+
+      <h2>Special buttons</h2>
+      <div class="row">
+        <label>menu / throttle-freeze <input class="md" id="f-suspend" list="btncodes"></label>
+        <label>layout switch <input class="md" id="f-switch" list="btncodes"></label>
+        <label><input type="checkbox" id="f-hat"> POV hat → d-pad</label>
+      </div>
+    </div>
+    <textarea id="rawjson" spellcheck="false"></textarea>
+    <div id="problems"></div>
+    <div class="row" style="margin-top:12px">
+      <button class="primary" id="savebtn">Save</button>
+      <span id="savemsg"></span>
+    </div>
+    <details style="margin-top:10px"><summary class="hint">resolved layout (with inheritance applied)</summary>
+      <pre id="resolved" style="font-size:12px;color:var(--dim);overflow:auto"></pre></details>
+  </div>
+  <datalist id="axcodes"></datalist>
+  <datalist id="btncodes"></datalist>
+</main>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+let codes = {axes: [], buttons: [], targets: [], button_targets: []};
+let layouts = [];
+let editName = null;      // layout being edited
+let raw = null;           // its raw JSON (the file)
+let resolved = {};        // the same layout with inheritance applied
+let inherited = {};       // what it would be if its own file said nothing
+let origRaw = {};         // the file as loaded, to keep saves faithful
+let curMode = "mode1";
+let rawMode = false;
+
+const api = async (path, opts) => {
+  const r = await fetch(path, opts);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.problems ? j.problems.join("\n") : (j.error || r.status));
+  return j;
+};
+
+// ── status polling ──────────────────────────────────────────────────────────
+async function poll() {
+  try {
+    const s = await api("/api/status");
+    $("hip").textContent = s.ip || "—";
+    $("hdev").textContent = s.device || "";
+    const x = $("st-xbox");
+    x.textContent = s.connected ? "CONNECTED" : "waiting";
+    x.className = "v " + (s.connected ? "ok" : "warn");
+    $("st-ping").textContent = s.ping_ms != null ? s.ping_ms + " ms" : "—";
+    const m = $("st-menu");
+    m.textContent = s.menu ? "ON (frozen)" : "OFF (flying)";
+    m.className = "v " + (s.menu ? "warn" : "ok");
+    m.dataset.on = s.menu ? "1" : "";
+    $("st-layout").textContent = s.layout_short || (s.legacy ? "legacy" : "—");
+    $("st-up").textContent = fmtUp(s.uptime_s);
+    layouts = s.layouts || [];
+    renderList();
+  } catch (e) { $("st-xbox").textContent = "bridge down?"; $("st-xbox").className = "v bad"; }
+}
+const fmtUp = s => s >= 3600 ? `${(s/3600)|0}h ${((s%3600)/60)|0}m` : s >= 60 ? `${(s/60)|0}m ${s%60}s` : s + "s";
+$("menubtn").onclick = async () => {
+  await api("/api/menu", {method: "POST", body: JSON.stringify({on: !$("st-menu").dataset.on})});
+  poll();
+};
+
+// ── layout list ─────────────────────────────────────────────────────────────
+function renderList() {
+  const el = $("laylist");
+  el.innerHTML = "";
+  for (const l of layouts) {
+    const d = document.createElement("div");
+    d.className = "lay" + (l.active ? " active" : "");
+    d.innerHTML = `<span class="nm">${esc(l.display_name)}</span>
+      <span class="meta">${esc(l.name)}.json${l.inherits ? " · inherits " + esc(l.inherits) : ""} · MFD: ${esc(l.short_name)}</span>
+      ${l.active ? '<span class="badge">ACTIVE</span>' : '<button class="small act">Activate</button>'}
+      <button class="small ed">Edit</button>
+      <button class="small dup" title="Copy this layout to a new one">Duplicate</button>
+      ${l.name !== "default" && !l.active ? '<button class="small danger del">Delete</button>' : ""}`;
+    const q = c => d.querySelector(c);
+    if (q(".act")) q(".act").onclick = () => api("/api/activate",
+      {method: "POST", body: JSON.stringify({name: l.name})}).then(poll).catch(alert);
+    q(".ed").onclick = () => openEditor(l.name);
+    q(".dup").onclick = () => duplicate(l.name);
+    if (q(".del")) q(".del").onclick = () => {
+      if (confirm(`Delete layout '${l.name}'?`))
+        api(`/api/layouts/${l.name}`, {method: "DELETE"}).then(poll).catch(e => alert(e.message));
+    };
+    el.appendChild(d);
+  }
+}
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+$("newbtn").onclick = async () => {
+  const name = prompt("New layout name (a-z, 0-9, _ , -):", "mygame");
+  if (!name) return;
+  if (!/^[a-z0-9][a-z0-9_\-]{0,31}$/.test(name)) return alert("bad name");
+  editName = name;
+  raw = {display_name: name, short_name: name.toUpperCase().slice(0, 8),
+         inherits: "default", order: 50, axes: {}, buttons: {}};
+  origRaw = JSON.parse(JSON.stringify(raw));
+  try { inherited = (await api("/api/layouts/default")).resolved; }
+  catch (e) { inherited = {}; }
+  resolved = inherited;
+  showEditor();
+};
+async function duplicate(src) {
+  const name = prompt(`Copy '${src}' as:`, src + "-copy");
+  if (!name) return;
+  try {
+    const j = await api(`/api/layouts/${src}`);
+    editName = name;
+    raw = j.raw;
+    resolved = j.resolved || {};
+    inherited = j.inherited || {};
+    raw.display_name = (raw.display_name || src) + " copy";
+    origRaw = JSON.parse(JSON.stringify(raw));
+    showEditor();
+  } catch (e) { alert(e.message); }
+}
+
+// ── editor ──────────────────────────────────────────────────────────────────
+async function openEditor(name) {
+  try {
+    const j = await api(`/api/layouts/${name}`);
+    editName = name;
+    raw = j.raw;
+    resolved = j.resolved || {};
+    inherited = j.inherited || {};
+    origRaw = JSON.parse(JSON.stringify(j.raw));
+    $("resolved").textContent = JSON.stringify(j.resolved, null, 2);
+    showEditor();
+  } catch (e) { alert(e.message); }
+}
+function showEditor() {
+  $("editor").classList.add("open");
+  $("ed-title").textContent = `Editing  ${editName}.json`;
+  $("problems").textContent = ""; $("savemsg").textContent = "";
+  rawMode = false; syncRawVisibility();
+  fillForm();
+  $("editor").scrollIntoView({behavior: "smooth"});
+}
+$("ed-close").onclick = () => $("editor").classList.remove("open");
+
+function fillForm() {
+  $("f-display").value = raw.display_name || "";
+  $("f-short").value = raw.short_name || "";
+  $("f-order").value = raw.order ?? "";
+  $("f-suspend").value = raw.suspend_button || "";
+  $("f-switch").value = raw.layout_switch_button || "";
+  // Blank means "inherit" — show what that resolves to so it isn't a mystery.
+  $("f-suspend").placeholder = inherited.suspend_button || "(none)";
+  $("f-switch").placeholder = inherited.layout_switch_button || "(none)";
+  $("f-hat").checked = (raw.hat_to_dpad ?? inherited.hat_to_dpad) !== false;
+  const inh = $("f-inherits");
+  inh.innerHTML = '<option value="">(none — standalone)</option>';
+  for (const l of layouts) if (l.name !== editName)
+    inh.innerHTML += `<option${l.name === raw.inherits ? " selected" : ""}>${esc(l.name)}</option>`;
+  renderAxes(); renderButtons();
+}
+
+function renderAxes() {
+  const tb = $("axtable").querySelector("tbody");
+  tb.innerHTML = "";
+  for (const [axis, acfg] of Object.entries(raw.axes || {})) addAxRow(axis, acfg || {});
+}
+function addAxRow(axis, acfg) {
+  const tb = $("axtable").querySelector("tbody");
+  const tr = document.createElement("tr");
+  // What this axis would be if the row said nothing — i.e. the parent's value.
+  const inh = ((inherited.axes || {})[axis]) || {};
+  const has = k => Object.prototype.hasOwnProperty.call(acfg, k);
+  // target: "" = inherit, "__null__" = explicitly drop the inherited one.
+  const sel = has("target") ? (acfg.target === null ? "__null__" : acfg.target) : "";
+  const opt = (v, label) => `<option value="${v}"${sel === v ? " selected" : ""}>${label}</option>`;
+  const ph = k => inh[k] != null ? ` placeholder="${esc(join(inh[k]))}"` : "";
+  tr.innerHTML = `
+    <td><input class="md ax-code" list="axcodes" value="${esc(axis)}"></td>
+    <td><select class="ax-target">
+      ${opt("", inh.target ? `inherit: ${inh.target}` : "inherit")}
+      ${opt("__null__", "none (drop inherited)")}
+      ${codes.targets.map(t => opt(t, t)).join("")}</select></td>
+    <td><input type="checkbox" class="ax-inv"${(has("invert") ? acfg.invert : inh.invert) ? " checked" : ""}></td>
+    <td><input class="sm ax-dz" type="number" step="0.01" min="0" max="1" value="${acfg.deadzone ?? ""}"${ph("deadzone")}></td>
+    <td><input class="sm ax-expo" type="number" step="0.05" min="0" max="1" value="${acfg.expo ?? ""}"${ph("expo")}></td>
+    <td><input class="md ax-blo" value="${esc(join(acfg.button_low))}"${ph("button_low")}></td>
+    <td><input class="md ax-bhi" value="${esc(join(acfg.button_high))}"${ph("button_high")}></td>
+    <td><input class="sm ax-thr" type="number" step="0.05" min="0.05" max="0.95" value="${acfg.button_threshold ?? ""}"${ph("button_threshold")}></td>
+    <td><button class="small danger">✕</button></td>`;
+  tr.querySelector("button").onclick = () => tr.remove();
+  tb.appendChild(tr);
+}
+$("addax").onclick = () => addAxRow("", {});
+
+function renderButtons() {
+  const tb = $("btable").querySelector("tbody");
+  tb.innerHTML = "";
+  const bmap = (raw.buttons || {})[curMode] || {};
+  const inhMap = (inherited.buttons || {})[curMode] || {};
+  for (const [b, t] of Object.entries(bmap)) addBtnRow(b, t);
+  // Show what this mode inherits but doesn't override, greyed, so you can see
+  // the whole live mapping — and edit an inherited row without hunting for it.
+  for (const [b, t] of Object.entries(inhMap))
+    if (!(b in bmap)) addBtnRow(b, undefined, t);
+}
+function addBtnRow(b, t, inherited) {
+  const tb = $("btable").querySelector("tbody");
+  const tr = document.createElement("tr");
+  const isInh = t === undefined && inherited !== undefined;
+  // Inherited rows show their real value (greyed). Left alone they stay
+  // inherited — the file keeps only what you actually change.
+  const val = isInh ? join(inherited) : join(t);
+  tr.innerHTML = `
+    <td><input class="lg b-code" list="btncodes" value="${esc(b)}"></td>
+    <td><input class="lg b-target" value="${esc(val)}"
+        placeholder="a  |  ls, rs  |  (blank = button does nothing)"
+        ${isInh ? 'data-inh="' + esc(val) + '" style="color:var(--dim)"' : ""}></td>
+    <td><button class="small danger">✕</button></td>`;
+  tr.querySelector("button").onclick = () => tr.remove();
+  // Once you change an inherited row it becomes your own override.
+  const ti = tr.querySelector(".b-target");
+  ti.oninput = () => {
+    if (ti.value !== ti.dataset.inh) { ti.style.color = ""; delete ti.dataset.inh; }
+  };
+  tb.appendChild(tr);
+}
+$("addbtn").onclick = () => addBtnRow("", "");
+const join = t => t == null ? "" : (Array.isArray(t) ? t.join(", ") : t);
+
+$("modetabs").onclick = e => {
+  if (e.target.dataset.m) {
+    harvestButtons();                      // keep edits when switching tabs
+    curMode = e.target.dataset.m;
+    for (const b of $("modetabs").children) b.classList.toggle("on", b === e.target);
+    renderButtons();
+  }
+};
+
+function harvestAxes() {
+  const axes = {};
+  for (const tr of $("axtable").querySelectorAll("tbody tr")) {
+    const code = tr.querySelector(".ax-code").value.trim();
+    if (!code) continue;
+    const a = {};
+    const inh = ((inherited.axes || {})[code]) || {};
+    const had = ((origRaw.axes || {})[code]) || {};
+    const t = tr.querySelector(".ax-target").value;
+    if (t === "__null__") a.target = null;   // deliberately drop the inherited target
+    else if (t) a.target = t;                // "" = say nothing, inherit it
+    // Keep a key the file already had; add one only when it changes something.
+    const inv = tr.querySelector(".ax-inv").checked;
+    if ("invert" in had || inv !== !!inh.invert) a.invert = inv;
+    const num = (cls, key) => {
+      const v = tr.querySelector(cls).value;
+      if (v !== "") a[key] = parseFloat(v);
+    };
+    num(".ax-dz", "deadzone"); num(".ax-expo", "expo"); num(".ax-thr", "button_threshold");
+    const lo = tr.querySelector(".ax-blo").value.trim();
+    const hi = tr.querySelector(".ax-bhi").value.trim();
+    if (lo) a.button_low = split(lo);
+    if (hi) a.button_high = split(hi);
+    axes[code] = a;
+  }
+  raw.axes = axes;
+}
+function harvestButtons() {
+  raw.buttons = raw.buttons || {};
+  const bmap = {};
+  for (const tr of $("btable").querySelectorAll("tbody tr")) {
+    const code = tr.querySelector(".b-code").value.trim();
+    if (!code) continue;
+    const ti = tr.querySelector(".b-target");
+    if (ti.dataset.inh !== undefined) continue;   // untouched inherited row
+    const t = ti.value.trim();
+    bmap[code] = t === "" ? null : split(t);      // null = bind to nothing
+  }
+  if (Object.keys(bmap).length) raw.buttons[curMode] = bmap;
+  else delete raw.buttons[curMode];
+}
+const split = s => {
+  const parts = s.split(",").map(x => x.trim()).filter(Boolean);
+  return parts.length > 1 ? parts : parts[0];
+};
+
+function harvestForm() {
+  harvestAxes(); harvestButtons();
+  raw.display_name = $("f-display").value || undefined;
+  raw.short_name = $("f-short").value || undefined;
+  raw.inherits = $("f-inherits").value || undefined;
+  raw.order = $("f-order").value === "" ? undefined : parseInt($("f-order").value);
+  raw.suspend_button = $("f-suspend").value || undefined;
+  raw.layout_switch_button = $("f-switch").value || undefined;
+  const hat = $("f-hat").checked;
+  raw.hat_to_dpad = ("hat_to_dpad" in origRaw || hat !== (inherited.hat_to_dpad !== false))
+    ? hat : undefined;
+  for (const k of Object.keys(raw)) if (raw[k] === undefined) delete raw[k];
+}
+
+// ── raw JSON toggle ─────────────────────────────────────────────────────────
+$("rawtoggle").onclick = () => {
+  if (!rawMode) {
+    harvestForm();
+    $("rawjson").value = JSON.stringify(raw, null, 2);
+  } else {
+    try { raw = JSON.parse($("rawjson").value); }
+    catch (e) { return alert("Bad JSON: " + e.message); }
+    fillForm();
+  }
+  rawMode = !rawMode;
+  syncRawVisibility();
+};
+function syncRawVisibility() {
+  $("rawjson").style.display = rawMode ? "block" : "none";
+  $("formview").style.display = rawMode ? "none" : "block";
+  $("rawtoggle").textContent = rawMode ? "form view" : "raw JSON";
+}
+
+// ── save ────────────────────────────────────────────────────────────────────
+$("savebtn").onclick = async () => {
+  $("problems").textContent = ""; $("savemsg").textContent = "";
+  if (rawMode) {
+    try { raw = JSON.parse($("rawjson").value); }
+    catch (e) { return $("problems").textContent = "Bad JSON: " + e.message; }
+  } else harvestForm();
+  try {
+    const j = await api(`/api/layouts/${editName}`,
+      {method: "PUT", body: JSON.stringify(raw)});
+    $("savemsg").textContent = "saved" + (j.applied === true ? " + applied live" : "");
+    const r = await api(`/api/layouts/${editName}`);
+    $("resolved").textContent = JSON.stringify(r.resolved, null, 2);
+    poll();
+  } catch (e) { $("problems").textContent = e.message; }
+};
+
+// ── init ────────────────────────────────────────────────────────────────────
+(async () => {
+  try {
+    codes = await api("/api/codes");
+    $("axcodes").innerHTML = codes.axes.map(c => `<option>${c}</option>`).join("");
+    $("btncodes").innerHTML = codes.buttons.map(c => `<option>${c}</option>`).join("");
+    $("targethint").textContent = codes.button_targets.join(" ");
+  } catch (e) {}
+  poll();
+  setInterval(poll, 2000);
+})();
+</script>
+</body>
+</html>

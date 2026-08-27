@@ -25,7 +25,18 @@ if [ -z "$ROLE" ]; then
 fi
 
 echo "=== Installing HOTAS Bridge to $DST ==="
-rsync -a --delete "$SRC"/ "$DST"/ 2>/dev/null || cp -r "$SRC"/. "$DST"/
+
+# Layouts you create or edit on the board live in $DST/layouts. Back them up
+# before syncing, and protect them from --delete, so an upgrade can never eat
+# a profile you built in the web editor. (Layouts SHIPPED with this repo are
+# still refreshed — your edits to those are in the backup tarball.)
+if [ -d "$DST/layouts" ]; then
+    BACKUP="$DST/layouts-backup-$(date +%Y%m%d-%H%M%S).tgz"
+    tar czf "$BACKUP" -C "$DST" layouts 2>/dev/null \
+        && echo "  existing layouts backed up to $BACKUP"
+fi
+rsync -a --delete --filter='protect layouts/**' "$SRC"/ "$DST"/ 2>/dev/null \
+    || cp -r "$SRC"/. "$DST"/
 chmod +x "$DST"/proxy/*.sh "$DST"/tools/*.sh 2>/dev/null || true
 # Ensure every shell script is 777 on the installed copy
 find "$DST" -name "*.sh" -type f -exec chmod 777 {} \; 2>/dev/null || true
@@ -113,9 +124,17 @@ case "$ROLE" in
     systemctl daemon-reload
     systemctl enable --now hotas-oberon.service
 
+    IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+    [ -z "$IP" ] && IP="<this-board-ip>"
+
     echo ""
     echo "=== Oberon mode installed and running ==="
-    echo "Next step on Xbox: open Oberon Remote, enter this board's IP, press Connect."
+    echo "Game layouts : $DST/layouts  ($(ls "$DST"/layouts/*.json 2>/dev/null | wc -l) installed)"
+    echo "Switch games : press the layout button on the throttle (T2 / BTN_BASE4)"
+    echo "               — the active game shows on the throttle screen."
+    echo "Web app      : http://$IP:8088   (status + layout editor, LAN only)"
+    echo ""
+    echo "Next step on Xbox: open Oberon Remote, enter $IP, press Connect."
     echo "Check status: journalctl -u hotas-oberon -f"
     ;;
 

@@ -15,7 +15,7 @@ Install libx52 on the Pi:
 Display layout (3 lines x 16 chars):
     line 0:  <Pi IP address>          e.g. 192.168.1.69
     line 1:  XBOX:<ON/--> <ping>ms    e.g. XBOX:ON   45ms
-    line 2:  MENU:<ON/OFF>            e.g. MENU:ON
+    line 2:  MENU:<ON/OFF> <game>     e.g. MENU:ON  AC7
 """
 import shutil
 import subprocess
@@ -119,6 +119,7 @@ class MFDStatus:
         self._connected = False
         self._ping_ms = None
         self._menu = False
+        self._game = ""      # active layout short_name, e.g. "AC7"
         self._last = None  # last rendered tuple, to skip redundant writes
         self._last_led = None
         self._stop = False
@@ -151,6 +152,11 @@ class MFDStatus:
         with self._lock:
             self._menu = menu_on
 
+    def set_game(self, short_name):
+        """Show which game layout is active (right side of the MENU line)."""
+        with self._lock:
+            self._game = (short_name or "")[:8]
+
     def set_mfd_brightness(self, level_0_128):
         """Live MFD brightness from the throttle knob (0..128)."""
         set_mfd_brightness(level_0_128)
@@ -171,7 +177,8 @@ class MFDStatus:
                 l1 = f"XBOX:ON {p:>7}"[:_LINE_LEN]
             else:
                 l1 = "XBOX:--  waiting"
-            l2 = f"MENU:{'ON' if self._menu else 'OFF'}"
+            menu = f"MENU:{'ON' if self._menu else 'OFF'}"
+            l2 = f"{menu:<8}{self._game:>8}" if self._game else menu
         return (ip[:_LINE_LEN], l1, l2)
 
     def _loop(self, hz):

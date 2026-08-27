@@ -1,0 +1,78 @@
+{
+  "_readme": [
+    "DEFAULT layout — the standard base every game layout inherits from.",
+    "",
+    "This is the tested Squadrons-style mapping: throttle on the left stick Y",
+    "(so it can never fire a weapon), flight stick on lx/ry, twist on rx.",
+    "Game layouts override only what differs and inherit the rest.",
+    "",
+    "layout_switch_button (T2, the lower half of the first T-rocker) cycles",
+    "through all layouts in 'order'; the active one shows on the throttle MFD",
+    "as its short_name. suspend_button (E) freezes the throttle for menus.",
+    "",
+    "Edit this file (or any layout) from the web editor:  http://<pi-ip>:8088"
+  ],
+  "display_name": "Default",
+  "short_name": "DEFAULT",
+  "order": 0,
+  "device_match": "X52",
+  "hat_to_dpad": true,
+  "throttle_axis": "ABS_Z",
+  "brightness_axis": "ABS_RY",
+  "led_brightness_axis": "ABS_RX",
+  "suspend_button": "BTN_BASE2",
+  "layout_switch_button": "BTN_BASE4",
+  "axes": {
+    "ABS_X":  { "target": "lx", "invert": false, "deadzone": 0.08, "expo": 0.2 },
+    "ABS_Y":  { "target": "ry", "invert": true,  "deadzone": 0.08, "expo": 0.2 },
+    "ABS_RZ": { "target": "rx", "invert": false, "deadzone": 0.12, "expo": 0.3 },
+    "ABS_Z":  { "target": "ly", "invert": true,  "deadzone": 0.03, "expo": 0.0 }
+  },
+  "buttons": {
+    "mode1": {
+      "BTN_TRIGGER": "rt_button",
+      "BTN_THUMB": "rb",
+      "BTN_PINKIE": "lb",
+      "BTN_TOP2": "a",
+      "BTN_TOP": "b",
+      "BTN_THUMB2": "rs",
+      "BTN_BASE3": "menu",
+      "BTN_BASE5": "view",
+      "BTN_BASE": "lt_button",
+      "BTN_TRIGGER_HAPPY15": "ls",
+      "BTN_TRIGGER_HAPPY12": "select_mode1",
+      "BTN_TRIGGER_HAPPY13": "select_mode1",
+      "BTN_TRIGGER_HAPPY14": "select_mode1"
+    },
+    "mode2": {
+      "BTN_TRIGGER": "rt_button",
+      "BTN_THUMB": "rb",
+      "BTN_PINKIE": "lb",
+      "BTN_TOP2": "a",
+      "BTN_TOP": "b",
+      "BTN_THUMB2": "rs",
+      "BTN_BASE3": "menu",
+      "BTN_BASE5": "view",
+      "BTN_BASE": "lt_button",
+      "BTN_TRIGGER_HAPPY15": "ls",
+      "BTN_TRIGGER_HAPPY12": "select_mode1",
+      "BTN_TRIGGER_HAPPY13": "select_mode1",
+      "BTN_TRIGGER_HAPPY14": "select_mode1"
+    },
+    "mode3": {
+      "BTN_TRIGGER": "rt_button",
+      "BTN_THUMB": "rb",
+      "BTN_PINKIE": "lb",
+      "BTN_TOP2": "a",
+      "BTN_TOP": "b",
+      "BTN_THUMB2": "rs",
+      "BTN_BASE3": "menu",
+      "BTN_BASE5": "view",
+      "BTN_BASE": "lt_button",
+      "BTN_TRIGGER_HAPPY15": "ls",
+      "BTN_TRIGGER_HAPPY12": "select_mode1",
+      "BTN_TRIGGER_HAPPY13": "select_mode1",
+      "BTN_TRIGGER_HAPPY14": "select_mode1"
+    }
+  }
+}

@@ -6,8 +6,12 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/opt/hotas-bridge/oberon
+# No --config: the server runs in LAYOUTS mode, reading /opt/hotas-bridge/layouts
+# and starting on whichever layout was last active. The throttle's layout-switch
+# button cycles games live; the web app (port 8088) edits them.
+# To pin one fixed config the old way, add:  --config /opt/hotas-bridge/sender/sender_config.json
 ExecStart=/usr/bin/python3 /opt/hotas-bridge/oberon/oberon_server.py \
-    --config /opt/hotas-bridge/sender/sender_config.json \
+    --layouts-dir /opt/hotas-bridge/layouts \
     --menu
 Restart=always
 RestartSec=3

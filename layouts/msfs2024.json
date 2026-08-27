@@ -1,0 +1,61 @@
+{
+  "_readme": [
+    "MICROSOFT FLIGHT SIMULATOR 2024 — port of the classic MSFS profile to",
+    "the layout system, with the mode DIAL now doing real work.",
+    "",
+    "Throttle -> RIGHT TRIGGER (absolute 0..100%), the closest to real HOTAS",
+    "behaviour on console. In-game: Controls > Throttle > bind THROTTLE AXIS",
+    "to the right trigger; do NOT use incremental throttle up/down.",
+    "",
+    "Stick -> left stick (roll/pitch), twist -> right stick X (rudder).",
+    "MODE DIAL: M1 = flight buttons, M2 = d-pad/systems layer, M3 = menus."
+  ],
+  "display_name": "MS Flight Simulator 2024",
+  "short_name": "MSFS",
+  "inherits": "default",
+  "order": 40,
+  "axes": {
+    "ABS_X":  { "target": "lx", "deadzone": 0.04, "expo": 0.3 },
+    "ABS_Y":  { "target": "ly", "deadzone": 0.04, "expo": 0.3 },
+    "ABS_RZ": { "target": "rx", "deadzone": 0.1 },
+    "ABS_Z":  { "target": "rt", "deadzone": 0.0 }
+  },
+  "buttons": {
+    "mode1": {
+      "BTN_TRIGGER": "a",
+      "BTN_THUMB": "b",
+      "BTN_THUMB2": "x",
+      "BTN_TOP": "y",
+      "BTN_TOP2": "rb",
+      "BTN_PINKIE": "lb",
+      "BTN_BASE": "ls",
+      "BTN_TRIGGER_HAPPY12": "select_mode1",
+      "BTN_TRIGGER_HAPPY13": "select_mode2",
+      "BTN_TRIGGER_HAPPY14": "select_mode3"
+    },
+    "mode2": {
+      "BTN_TRIGGER": "rs",
+      "BTN_THUMB": "dpad_up",
+      "BTN_THUMB2": "dpad_down",
+      "BTN_TOP": "dpad_left",
+      "BTN_TOP2": "dpad_right",
+      "BTN_PINKIE": "ls",
+      "BTN_BASE": null,
+      "BTN_TRIGGER_HAPPY12": "select_mode1",
+      "BTN_TRIGGER_HAPPY13": "select_mode2",
+      "BTN_TRIGGER_HAPPY14": "select_mode3"
+    },
+    "mode3": {
+      "BTN_TRIGGER": "menu",
+      "BTN_THUMB": "view",
+      "BTN_THUMB2": "a",
+      "BTN_TOP": "b",
+      "BTN_TOP2": null,
+      "BTN_PINKIE": null,
+      "BTN_BASE": null,
+      "BTN_TRIGGER_HAPPY12": "select_mode1",
+      "BTN_TRIGGER_HAPPY13": "select_mode2",
+      "BTN_TRIGGER_HAPPY14": "select_mode3"
+    }
+  }
+}

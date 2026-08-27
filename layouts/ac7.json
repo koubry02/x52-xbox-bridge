@@ -1,0 +1,56 @@
+{
+  "_readme": [
+    "ACE COMBAT 7: SKIES UNKNOWN — matches the game's default Xbox scheme",
+    "(Standard or Expert; both use the same buttons, only in-game stick",
+    "behaviour differs). No in-game rebinding needed.",
+    "",
+    "AC7 flies on the LEFT stick (pitch + roll) with the camera on the right",
+    "stick, and throttle is split over the triggers: RT = accelerate,",
+    "LT = brake, both together = high-G turn.",
+    "",
+    "So here: main stick X/Y -> left stick (roll/pitch, pull back to climb).",
+    "THROTTLE LEVER is split: forward half -> RT (accelerate), back half ->",
+    "LT (brake), centre detent = cruise. TWIST works the digital yaw",
+    "buttons: twist left = LB (yaw left), twist right = RB (yaw right).",
+    "",
+    "Trigger = missile (B). Thumb FIRE = machine gun (A). C head = change",
+    "target (Y). B head = change weapon (X). A head = change view (RS).",
+    "PINKIE = flares (LS+RS pressed together). D = high-G (LT+RT together).",
+    "POV hat = radio replies. T1 = pause, T3 = map zoom."
+  ],
+  "display_name": "Ace Combat 7",
+  "short_name": "AC7",
+  "inherits": "default",
+  "order": 20,
+  "axes": {
+    "ABS_Y":  { "target": "ly" },
+    "ABS_RZ": { "target": null, "button_low": "lb", "button_high": "rb", "button_threshold": 0.35 },
+    "ABS_Z":  { "target": "split_lt_rt", "deadzone": 0.06 }
+  },
+  "buttons": {
+    "mode1": {
+      "BTN_TRIGGER": "b",
+      "BTN_THUMB": "a",
+      "BTN_TOP2": "y",
+      "BTN_TOP": "x",
+      "BTN_PINKIE": ["ls", "rs"],
+      "BTN_BASE": ["lt_button", "rt_button"]
+    },
+    "mode2": {
+      "BTN_TRIGGER": "b",
+      "BTN_THUMB": "a",
+      "BTN_TOP2": "y",
+      "BTN_TOP": "x",
+      "BTN_PINKIE": ["ls", "rs"],
+      "BTN_BASE": ["lt_button", "rt_button"]
+    },
+    "mode3": {
+      "BTN_TRIGGER": "b",
+      "BTN_THUMB": "a",
+      "BTN_TOP2": "y",
+      "BTN_TOP": "x",
+      "BTN_PINKIE": ["ls", "rs"],
+      "BTN_BASE": ["lt_button", "rt_button"]
+    }
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "_readme": [
+    "STAR WARS: SQUADRONS — matches the game's default control scheme, so no",
+    "in-game rebinding is needed. This IS the standard base mapping, so the",
+    "layout inherits default and changes nothing but its labels.",
+    "",
+    "Throttle -> left stick Y (up = forward), roll -> stick X, pitch -> stick",
+    "fwd/back, yaw -> twist. Trigger fires, thumb FIRE = right auxiliary,",
+    "pinkie = left auxiliary, C = cycle targets, B = countermeasures,",
+    "A = free look, D = select target ahead, I = boost, POV hat = power mgmt."
+  ],
+  "display_name": "Star Wars: Squadrons",
+  "short_name": "SQUADRNS",
+  "inherits": "default",
+  "order": 10
+}

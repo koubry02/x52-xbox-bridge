@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+
+# Which layout is currently active — per-board runtime state, not source.
+layouts/.active
+
+# Calibration output is unit-specific.
+sender/sender_config.calibrated.json

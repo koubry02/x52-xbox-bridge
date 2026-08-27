@@ -10,36 +10,37 @@ injects them as a controller.
 X52  ──USB──►  Orange Pi Zero 3  ──WiFi──►  Oberon app on Xbox  ──►  game
 ```
 
-Built and tuned for **Star Wars: Squadrons**, with a ready MSFS 2024 profile too.
+Ships with tuned layouts for **Star Wars: Squadrons**, **Ace Combat 7**,
+**Battlefield 6** and **MSFS 2024** — switch between them with a button on the
+throttle, and edit them from a browser on your network.
 
 ---
 
-## Layout
+## What's where
 
-![X52 Pro layout](x52_layout.png)
+```
+hotas-bridge/
+├── install.sh                     one-shot installer (sudo ./install.sh oberon)
+├── x52_layout.png                 the layout diagram below
+├── layouts/                       ← game layouts (JSON, with inheritance)
+│   ├── default.json               the base every game inherits from
+│   ├── squadrons.json             Star Wars: Squadrons
+│   ├── ac7.json                   Ace Combat 7: Skies Unknown
+│   ├── bf6.json                   Battlefield 6 (aircraft)
+│   └── msfs2024.json              MS Flight Simulator 2024
+└── oberon/
+    ├── oberon_server.py           the server: reads X52, talks to Oberon
+    ├── layouts.py                 layout loading, inheritance, validation
+    ├── webapp.py                  the LAN status page + layout editor
+    ├── web/index.html             its front end
+    ├── mfd.py                     throttle-screen + LED status (libx52)
+    ├── build_libx52.sh            builds libx52 from source (Armbian/arm64)
+    ├── calibrate.py               calibration wizard
+    └── hotas-oberon.service       starts the server on boot (menu mode)
+```
 
-One mode — the dial position doesn't matter, all layers are identical. The
-throttle sits on the left stick, so it can never fire the weapon.
-
-| Xbox | HOTAS control | Squadrons function |
-|------|---------------|--------------------|
-| Left stick Y | Throttle lever | Throttle (up = forward) |
-| Left stick X | Stick left / right | Roll |
-| Right stick Y | Stick fwd / back | Pitch |
-| Right stick X | Twist | Yaw |
-| RT | Main trigger | Fire |
-| RB | Thumb FIRE button | Fire Right Auxiliary |
-| LB | Pinkie trigger | Fire Left Auxiliary |
-| A | C head button | Cycle Targets |
-| B | B head button | Deploy Countermeasures |
-| RS | A head button | Free Look |
-| LT | D button (throttle) | Select Target Ahead |
-| LS | I button (throttle) | Boost |
-| Menu | T1 rocker | Menu |
-| View | T2 rocker | Show Loadout |
-| D-pad | POV hat | Power: up=weapon, left=engine, down=balance, right=shield |
-| — | E button (throttle) | Menu-disable — freezes the throttle for menus |
-| — | Upper / lower rotary | MFD / button-LED brightness |
+The `proxy/`, `receiver/`, `sender/` and `tools/` folders belong to an
+alternative USB-hardware mode and aren't needed for Oberon.
 
 ---
 
@@ -70,7 +71,221 @@ that jitter on their own, lets you pick the menu-disable button, and applies the
 result automatically.
 
 **4. Connect.** On the Xbox open **Oberon Remote**, enter the Pi's IP (printed
-on startup, or shown on the throttle screen), press **Connect**, and fly.
+on startup, shown on the throttle screen, and on the web page), press
+**Connect**, and fly.
+
+---
+
+## Switching games
+
+Press the **layout button** on the throttle — by default `BTN_BASE4`, the lower
+half of the first T-rocker — to cycle through the installed layouts:
+
+```
+DEFAULT → SQUADRNS → AC7 → BF6 → MSFS → (back to DEFAULT)
+```
+
+The switch is instant and safe: the axes publish neutral and any held buttons
+are dropped on the changeover, so a layout switch can never flush a phantom
+input into the game.
+
+**Which one am I on?** The active game shows in three places:
+
+- the **throttle screen** (X52 Pro), on the bottom line next to the menu state:
+
+  ```
+  192.168.1.69       ← Pi IP (enter this in the Oberon app)
+  XBOX:ON    45ms    ← Oberon connected + poll ping
+  MENU:ON       AC7  ← menu mode  |  active game layout
+  ```
+
+- the **web page** at `http://<pi-ip>:8088`
+- the service log: `journalctl -u hotas-oberon -f`
+
+You can also switch from the web page, or start on a given layout:
+
+```bash
+sudo python3 /opt/hotas-bridge/oberon/oberon_server.py --layout ac7
+```
+
+The choice is remembered across restarts (in `layouts/.active`).
+
+---
+
+## The web app
+
+Every board runs a small status page and layout editor on **port 8088**, reachable
+from any browser on the same network:
+
+```
+http://<pi-ip>:8088
+```
+
+It gives you:
+
+- **Live status** — Oberon connected or not, poll ping, menu mode (with a toggle),
+  active layout, uptime, and the stick it found.
+- **Layout list** — activate, edit, duplicate, or delete any layout.
+- **A layout editor** — a form for axes, buttons (per mode-dial layer), and the
+  special buttons, plus a raw-JSON view for when you'd rather just type. It
+  validates before saving and tells you exactly what's wrong if it won't take.
+  Saving the *active* layout re-applies it live — no restart, no reconnect.
+- **A resolved preview** showing the final layout with inheritance applied, so
+  you can see what you actually inherited.
+
+> **No password.** Anyone on your LAN can edit layouts and toggle menu mode.
+> That's deliberate — it's a tool for your own network. Don't port-forward it.
+> To turn it off entirely, add `--web-port 0` to the service's `ExecStart`.
+
+---
+
+## Layouts and inheritance
+
+A layout is one JSON file in `layouts/`. It can **inherit** from another layout
+(nearly always `default`) and override only what differs — so a game layout stays
+short and readable, and a fix to the base mapping reaches every game at once.
+
+```json
+{
+  "display_name": "Ace Combat 7",
+  "short_name": "AC7",
+  "inherits": "default",
+  "order": 20,
+  "axes":    { "ABS_Y": { "target": "ly" } },
+  "buttons": { "mode1": { "BTN_TRIGGER": "b" } }
+}
+```
+
+Merge rules, child over parent:
+
+| In the child | Result |
+|---|---|
+| a value | replaces the inherited one |
+| an object | merges key-by-key, recursively |
+| `null` | **deletes** the inherited key |
+
+So `"BTN_BASE": null` in a mode removes a button the parent had bound, and
+`"ABS_RZ": { "target": null, "button_low": "lb" }` turns an inherited analog
+axis into a pair of digital buttons.
+
+**Keys:**
+
+- **`display_name`** — full name, shown in the web UI.
+- **`short_name`** — up to 8 characters, shown on the throttle screen.
+- **`order`** — position in the switch-button cycle (ties break by name).
+- **`axes`** — evdev axis name → mapping:
+  - `target` — `lx ly rx ry lt rt`, or `split_lt_rt` (see below), or `null`.
+  - `invert`, `deadzone` (0–1), `expo` (0–1, softens the middle of the throw).
+  - `button_low` / `button_high` — press an Xbox button while the axis is past
+    ∓`button_threshold` (default 0.5). Turns an analog axis into digital
+    buttons — e.g. twist → LB/RB for Ace Combat's yaw.
+- **`buttons`** — `mode1`/`mode2`/`mode3` (the mode dial) → evdev button name →
+  target. A target is `a b x y lb rb ls rs view menu dpad_*`, `lt_button` /
+  `rt_button` for a trigger tap, `select_mode1..3`, or a **list** to press
+  several at once (`["ls", "rs"]` = Ace Combat's flares).
+- **`suspend_button`** — freezes the throttle for menus (see below).
+- **`layout_switch_button`** — cycles layouts.
+- **`throttle_axis`** — which axis the menu freeze applies to (default `ABS_Z`).
+- **`brightness_axis` / `led_brightness_axis`** — throttle rotaries for MFD and
+  LED brightness (`""` disables). Only active while unmapped as a game axis.
+- **`hat_to_dpad`** — POV hat drives the d-pad when true.
+
+**`split_lt_rt`** splits one lever across both triggers: forward half drives RT,
+back half drives LT, centre is neither. That's how Ace Combat's
+accelerate/brake-on-one-throttle works.
+
+Find any button or axis code on your unit with:
+
+```bash
+sudo python3 /opt/hotas-bridge/oberon/oberon_server.py --probe
+```
+
+---
+
+## The layouts
+
+### Star Wars: Squadrons
+
+Matches the game's **default** control scheme — set the scheme to Default and
+fly, no in-game rebinding. This is also the base layout everything inherits.
+
+![X52 Pro layout](x52_layout.png)
+
+| Xbox | HOTAS control | Squadrons function |
+|------|---------------|--------------------|
+| Left stick Y | Throttle lever | Throttle (up = forward) |
+| Left stick X | Stick left / right | Roll |
+| Right stick Y | Stick fwd / back | Pitch |
+| Right stick X | Twist | Yaw |
+| RT | Main trigger | Fire |
+| RB | Thumb FIRE button | Fire Right Auxiliary |
+| LB | Pinkie trigger | Fire Left Auxiliary |
+| A | C head button | Cycle Targets |
+| B | B head button | Deploy Countermeasures |
+| RS | A head button | Free Look |
+| LT | D button (throttle) | Select Target Ahead |
+| LS | I button (throttle) | Boost |
+| Menu | T1 rocker | Menu |
+| View | T2 rocker | Show Loadout |
+| D-pad | POV hat | Power: up=weapon, left=engine, down=balance, right=shield |
+
+The throttle sits on the **left stick**, where it can never fire a weapon.
+
+### Ace Combat 7: Skies Unknown
+
+Matches AC7's default Xbox scheme (Standard *or* Expert — they share the same
+buttons; only the in-game stick behaviour differs). No rebinding needed.
+
+| Xbox | HOTAS control | AC7 function |
+|------|---------------|--------------|
+| Left stick | Main stick | Pitch + roll |
+| RT / LT | **Throttle lever, split** | Forward = accelerate, back = brake |
+| LB / RB | Twist left / right | Yaw left / right (digital) |
+| B | Main trigger | Fire missile / special weapon |
+| A | Thumb FIRE button | Machine gun |
+| Y | C head button | Change target |
+| X | B head button | Change weapon |
+| RS | A head button | Change view |
+| LS + RS | Pinkie trigger | **Flares** (both sticks at once) |
+| LT + RT | D button (throttle) | High-G turn (both triggers) |
+| D-pad | POV hat | Radio replies |
+| Menu / View | T1 rocker | Pause / map |
+
+The split throttle is the interesting bit: AC7 puts accelerate and brake on
+opposite triggers, so one physical lever drives both — push past centre to
+accelerate, pull back past centre to brake.
+
+### Battlefield 6 (aircraft)
+
+Matches BF6's **default** Aircraft controller preset. You do *not* need the
+in-game "Alternate" preset — that exists to work around a gamepad having too few
+axes, and the HOTAS doesn't have that problem. Leave it on Default.
+
+| Xbox | HOTAS control | BF6 function |
+|------|---------------|--------------|
+| Left stick Y | Throttle lever | Throttle |
+| Left stick X | Twist | Yaw |
+| Right stick | Main stick | Pitch + roll (forward = nose down) |
+| RT | Main trigger | Fire |
+| LT | Pinkie trigger | Zoom |
+| LS | I button (throttle) | Afterburner |
+| RS | A head button | Camera / view |
+| Y | C head button | Switch weapon |
+| X | B head button | Reload (hold to exit) |
+| A | D button (throttle) | Switch seat |
+| B | Thumb FIRE button | B |
+| D-pad | POV hat | Equipment slots (countermeasures) |
+| Menu / View | T1 rocker | Pause / scoreboard |
+
+### MS Flight Simulator 2024
+
+Throttle on the **right trigger** as an absolute 0–100% axis — the closest thing
+to real HOTAS behaviour on a console. In-game: *Controls → Throttle → bind
+THROTTLE AXIS to the right trigger*; do **not** use the incremental
+throttle-up/down bindings, which is what makes a lever feel wrong.
+
+This is also the one layout that uses the **mode dial**: M1 flight buttons,
+M2 a d-pad/systems layer, M3 menus.
 
 ---
 
@@ -83,8 +298,12 @@ and steers radial wheels you're trying to use.
 **The fix is built in.** The service starts in *menu mode*, where the throttle
 is frozen to neutral while the flight sticks stay live. Navigate menus, launch
 your match, then press the **E button** once to unfreeze and fly. Press it again
-whenever you're back in a menu. The throttle screen shows `MENU:ON`/`OFF`, and
-the button LEDs turn **amber** in menu mode, **green** when flying.
+whenever you're back in a menu. The throttle screen shows `MENU:ON`/`OFF`, the
+web page shows it with a toggle, and the button LEDs turn **amber** in menu mode,
+**green** when flying.
+
+The freeze follows the layout: it always freezes whatever that layout put the
+throttle lever on, including both halves of a `split_lt_rt` throttle.
 
 ---
 
@@ -97,7 +316,7 @@ can reflect state. This needs the **libx52** driver
 ```
 192.168.1.69       ← Pi IP (enter this in the Oberon app)
 XBOX:ON    45ms    ← Oberon connected + poll ping
-MENU:ON            ← menu mode on/off
+MENU:ON       AC7  ← menu mode + active game layout
 ```
 
 - **Button LEDs:** green while flying, amber in menu mode. (The X52 Pro's FIRE
@@ -120,87 +339,87 @@ sudo systemctl restart hotas-oberon
 > apt. Build from source instead (the script above does exactly that).
 
 Everything here is optional: if libx52 isn't installed, the bridge runs exactly
-the same without the display, LEDs, or brightness knobs.
+the same without the display, LEDs, or brightness knobs — the web page still
+shows all the same status.
 
 ---
 
-## In-game (Star Wars: Squadrons)
+## Making your own layout
 
-The mapping matches Squadrons' **default** control scheme, so no in-game
-rebinding is needed — just set the scheme to Default. For MSFS 2024, use the
-ready-made profile:
+Easiest path: open `http://<pi-ip>:8088`, hit **Duplicate** on whichever layout
+is closest, change what you want, **Save**. If you're editing the layout that's
+currently active, it re-applies immediately — no restart.
 
-```bash
-sudo python3 /opt/hotas-bridge/oberon/oberon_server.py \
-    --config /opt/hotas-bridge/sender/profiles/sender_config.msfs2024.json --menu
+By hand, drop a file in `layouts/`:
+
+```json
+{
+  "display_name": "Elite Dangerous",
+  "short_name": "ELITE",
+  "inherits": "default",
+  "order": 50,
+  "axes": { "ABS_Z": { "target": "rt" } },
+  "buttons": { "mode1": { "BTN_TRIGGER": "a" } }
+}
 ```
 
----
+Then restart, or hit the switch button until it comes round.
 
-## Tweaking the mapping
-
-Everything lives in `sender/sender_config.json`:
-
-- **`axes`** — maps an evdev axis to an Xbox target (`lx ly rx ry lt rt`).
-  `invert` flips it, `deadzone` (0–1) kills centre drift, `expo` (0–1) softens
-  the middle of the throw.
-- **`buttons`** — one active layer here; targets are `a b x y lb rb ls rs view
-  menu dpad_*` plus `lt_button` / `rt_button` for trigger taps.
-- **`suspend_button`** — the button that freezes the throttle for menus.
-- **`brightness_axis` / `led_brightness_axis`** — throttle rotaries for MFD and
-  LED brightness (set to `""` to disable).
-- **`hat_to_dpad`** — POV hat drives the d-pad when true.
-
-Find any button or axis code with:
-
-```bash
-sudo python3 /opt/hotas-bridge/oberon/oberon_server.py --probe
-```
-
-After any change, restart so it reloads: `sudo systemctl restart hotas-oberon`.
+**Keep your changes in your own layout, not in the shipped ones.** `install.sh`
+refreshes the layouts that ship with this repo on every upgrade (it backs the
+whole folder up to `layouts-backup-<timestamp>.tgz` first, and never touches
+layouts you created).
 
 ---
 
 ## Troubleshooting
 
 **Menu cursor drifts / throttle scrolls the dashboard.** You're not in menu
-mode. Start the service (it boots in menu mode) or press the E button to freeze
-the throttle. After any file change, `sudo systemctl restart hotas-oberon`.
+mode. Start the service (it boots in menu mode), press the E button, or hit the
+toggle on the web page.
 
-**A control does the wrong thing.** Your stick's codes don't match the config —
-re-run the calibration wizard.
+**A control does the wrong thing.** Your stick's codes don't match the layout —
+re-run the calibration wizard, or open the web editor and check the axis
+targets against `--probe` output.
+
+**Pitch is backwards.** Flip `invert` on the pitch axis in the web editor and
+save — it applies live. Which way "correct" is depends on the game and on your
+unit; one click either way.
+
+**I don't know which layout I'm on.** Look at the throttle screen's bottom line,
+or the web page, or `journalctl -u hotas-oberon -f` (it logs every switch).
+
+**The switch button does nothing.** That layout has no `layout_switch_button`,
+or the name doesn't match your unit. Check it with `--probe`, then set it in the
+web editor. Note the button is read from the *active* layout, so if you switch
+into a layout that lacks it, you'll have to switch back from the web page.
+
+**Web page won't load.** Check the service is up (`systemctl status
+hotas-oberon`) and that you're on the same network. The startup log prints the
+exact URL. Port 8088 by default.
 
 **Xbox won't connect.** Pi and Xbox must share a network. Re-enter the Pi's IP
 in Oberon. Check the server: `systemctl status hotas-oberon`.
 
-**Watch what's happening live:** `journalctl -u hotas-oberon -f` shows mode
-switches, menu toggles, and connection state. Add `--verbose` to a manual run to
-see axis values on every poll.
+**Watch what's happening live:** `journalctl -u hotas-oberon -f` shows layout
+switches, mode switches, menu toggles, and connection state. Add `--verbose` to
+a manual run to see axis values on every poll.
 
 **The display stays blank.** libx52 isn't built or `x52cli` isn't on PATH. Test
-directly: `sudo x52cli mfd 0 "TEST"`. If that errors, run
-`build_libx52.sh` and replug the stick to apply the udev rule.
+directly: `sudo x52cli mfd 0 "TEST"`. If that errors, run `build_libx52.sh` and
+replug the stick to apply the udev rule.
 
 ---
 
-## Files
+## Running one fixed config (the old way)
 
-```
-hotas-bridge/
-├── install.sh                     one-shot installer (sudo ./install.sh oberon)
-├── x52_layout.png                 the layout diagram above
-├── oberon/
-│   ├── oberon_server.py           the server: reads X52, talks to Oberon
-│   ├── mfd.py                     optional throttle-screen + LED status (libx52)
-│   ├── build_libx52.sh            builds libx52 from source (Armbian/arm64)
-│   ├── calibrate.py               calibration wizard
-│   └── hotas-oberon.service       starts the server on boot (menu mode)
-└── sender/
-    ├── sender_config.json         your active config
-    └── profiles/
-        ├── sender_config.squadrons.json
-        └── sender_config.msfs2024.json
+Layouts replaced the single `sender/sender_config.json`, but that path still
+works — pass `--config` and layout switching turns off:
+
+```bash
+sudo python3 /opt/hotas-bridge/oberon/oberon_server.py \
+    --config /opt/hotas-bridge/sender/sender_config.json --menu
 ```
 
-The `proxy/`, `receiver/`, and `tools/` folders belong to an alternative
-USB-hardware mode and aren't needed for Oberon.
+This is what `calibrate.py` writes to, so it's a good way to run a freshly
+calibrated config before folding your calibration into a layout.
