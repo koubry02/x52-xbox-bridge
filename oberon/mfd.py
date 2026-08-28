@@ -148,8 +148,7 @@ class MFDStatus:
         self._connected = False
         self._ping_ms = None
         self._ping_at = None   # when the last poll landed, for stall detection
-        self._input_ms = None  # of the total, the part spent on this board
-        self._link_ms = None   # measured round trip to the Xbox and back
+        self._shown_ping = None  # the figure currently on the glass
         # Set by anything the user is waiting to see, so the refresh loop
         # redraws now instead of on its next tick.
         self._wake = threading.Event()
@@ -178,19 +177,17 @@ class MFDStatus:
             if not connected:
                 self._ping_ms = None
                 self._ping_at = None
-                self._input_ms = None
-                self._link_ms = None
+                self._shown_ping = None
 
-    def set_latency(self, total_ms, input_ms, link_ms):
-        """total = stick moved -> Xbox has it. input = the part spent here."""
+    def set_latency(self, total_ms, input_ms=None, link_ms=None):
+        """total = stick moved -> Xbox has it. The breakdown (input_ms /
+        link_ms) is for the web page; the throttle screen shows one figure."""
         with self._lock:
             self._ping_ms = total_ms
-            self._input_ms = input_ms
-            self._link_ms = link_ms
             self._ping_at = time.monotonic()
 
-    def set_ping(self, ping_ms):            # kept for callers that only have one figure
-        self.set_latency(ping_ms, None, None)
+    def set_ping(self, ping_ms):            # callers that only have one figure
+        self.set_latency(ping_ms)
 
     def set_menu(self, menu_on):
         with self._lock:
@@ -240,32 +237,33 @@ class MFDStatus:
             return f"{ping_ms:.1f}ms"
         return f"{int(ping_ms)}ms"
 
-    @staticmethod
-    def _fmt_short(ms):
-        """A latency in at most 5 characters, for the breakdown line."""
-        if ms is None:
-            return "--"
-        if ms >= 1000:
-            return f"{ms / 1000:.1f}s"      # 1.5s
-        if ms < 10:
-            return f"{ms:.1f}ms"            # 6.2ms — tenths matter down here
-        return f"{int(ms)}ms"               # 12ms / 148ms
+    def _settled_ping(self, ping_ms):
+        """The figure to actually print, held steady against jitter.
+
+        Every change costs a process spawn and a USB round-trip, and a live
+        latency reading wobbles by a fraction of a millisecond constantly —
+        which would have the screen rewriting itself twice a second forever.
+        This only moves when it moves meaningfully. The web page carries the
+        live unfiltered version, and the full breakdown with it."""
+        if ping_ms is None:
+            self._shown_ping = None
+        else:
+            cur = self._shown_ping
+            if cur is None or abs(ping_ms - cur) >= max(1.0, cur * 0.25):
+                self._shown_ping = ping_ms
+        return self._shown_ping
 
     def _render(self):
         with self._lock:
+            # Line 0 is the IP, always — it's what you type into the Oberon
+            # app, and a line that never changes never has to be redrawn.
+            # Where the latency goes lives on the web page, not here.
             l0 = self._ip or "no IP"
             if self._connected:
                 age = None if self._ping_at is None else (time.monotonic() - self._ping_at)
-                l1 = f"XBOX:ON {self._fmt_ping(self._ping_ms, age):>7}"
-                # The IP only matters until you're connected — once you are,
-                # this line is better spent showing where the latency goes:
-                # how long the input sat on this board vs the trip to the Xbox.
-                if (self._input_ms is not None and self._link_ms is not None
-                        and not (age is not None and age > STALL_AFTER_S)):
-                    # 2 + 5 + 1 + 3 + 5 = exactly the 16 characters available.
-                    l0 = (f"IN{self._fmt_short(self._input_ms):>5}"
-                          f" LNK{self._fmt_short(self._link_ms):>5}")
+                l1 = f"XBOX:ON {self._fmt_ping(self._settled_ping(self._ping_ms), age):>7}"
             else:
+                self._shown_ping = None
                 l1 = "XBOX:--  waiting"
             menu = f"MENU:{'ON' if self._menu else 'OFF'}"
             l2 = f"{menu:<8}{self._game:>8}" if self._game else menu

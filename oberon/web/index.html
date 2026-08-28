@@ -860,24 +860,19 @@ function renderLatency(s) {
 /* A replica of what the throttle screen is showing right now — same three
    16-character lines, same rules, so the answer to "what does my stick say"
    is on the page. Mirrors MFDStatus._render in mfd.py. */
-const mfdShort = ms => ms == null ? "--"
-  : ms >= 1000 ? (ms / 1000).toFixed(1) + "s"
-  : ms < 10 ? ms.toFixed(1) + "ms" : Math.round(ms) + "ms";
 // Mirrors MFDStatus._fmt_ping: a sub-millisecond link shouldn't read "0ms".
 const mfdPing = ms => ms == null ? "--ms"
   : ms >= 1000 ? (ms / 1000).toFixed(1) + "s"
   : ms < 10 ? ms.toFixed(1) + "ms" : Math.round(ms) + "ms";
 function mfdLines(s, act) {
-  let l0 = s.ip || "no IP", l1;
+  // Line 0 is always the IP — the breakdown lives on this page, not on the
+  // 16-character screen. Mirrors MFDStatus._render.
+  const l0 = s.ip || "no IP";
+  let l1;
   if (!s.connected) l1 = "XBOX:--  waiting";
   else {
     const p = s.ping_stale ? "STALL" : mfdPing(s.ping_ms);
     l1 = "XBOX:ON " + p.padStart(7);
-    // The IP only matters until you're connected; after that the line shows
-    // the split. Mirrors MFDStatus._render.
-    if (s.input_ms != null && s.link_ms != null && !s.ping_stale)
-      l0 = "IN" + mfdShort(s.input_ms).padStart(5) +
-           " LNK" + mfdShort(s.link_ms).padStart(5);
   }
   const menu = "MENU:" + (s.menu ? "ON" : "OFF");
   const game = act ? act.short_name : "";

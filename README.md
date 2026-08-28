@@ -414,18 +414,17 @@ The X52 Pro's throttle screen can show live bridge status, and the button LEDs
 can reflect state. This needs the **libx52** driver
 (https://github.com/nirenjan/libx52), which the installer sets up for you.
 
-Before you connect, the top line is the IP you need to type into the Oberon
-app. Once you're connected that line has done its job, so it switches to
-showing where your input latency goes:
-
 ```
-192.168.1.69       ← Pi IP — until you connect
-XBOX:--  waiting
-
-IN5.6ms LNK 12ms   ← after connecting: on this board / round trip
-XBOX:ON    12ms    ← stick moved → Xbox has it
+192.168.1.69       ← Pi IP (enter this in the Oberon app)
+XBOX:ON    12ms    ← connected + input latency: stick moved → Xbox has it
 MENU:ON       AC7  ← menu mode + active game layout
 ```
+
+The screen is deliberately quiet. Every character written costs a process
+spawn and a USB round-trip, so the latency figure only moves when it moves
+*meaningfully* — a link jittering around 1.8 ms redraws roughly three times a
+minute rather than twice a second, while a real jump to 45 ms shows up at
+once. The live, unfiltered numbers are on the web page.
 
 The latency line tells the truth when the link degrades — that's the point:
 
@@ -436,8 +435,9 @@ The latency line tells the truth when the link degrades — that's the point:
 | `STALL` | connected, but nothing has arrived for over 1.5s |
 | `waiting` | no Oberon client connected |
 
-The web page shows the same figures with the split broken out, plus the worst
-reading in the last five seconds — which is what actually ruins a turn.
+The web page shows the same figure live, plus the split between time spent on
+the board and the trip to the Xbox, and the worst reading in the last five
+seconds — which is what actually ruins a turn.
 
 - **Button LEDs:** green while flying, amber in menu mode. (The X52 Pro's FIRE
   and THROTTLE LEDs are on/off only — hardware limitation — so those don't
