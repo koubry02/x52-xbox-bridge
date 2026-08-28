@@ -234,6 +234,10 @@ class MFDStatus:
             return "STALL"
         if ping_ms >= 1000:
             return f"{ping_ms / 1000:.1f}s"      # 1.4s reads better than 1400ms
+        if ping_ms < 10:
+            # A good wired-ish link lands under a millisecond. Rounding that to
+            # "0ms" looks broken rather than excellent.
+            return f"{ping_ms:.1f}ms"
         return f"{int(ping_ms)}ms"
 
     @staticmethod

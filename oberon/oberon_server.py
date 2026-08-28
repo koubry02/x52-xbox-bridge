@@ -87,6 +87,7 @@ PORT          = 26401
 WEB_PORT      = 8088
 PING_MAX_MS   = 10_000    # above this it's a gap in polling, not latency
 WORST_WINDOW  = 5.0       # seconds of history behind the "worst" latency figure
+INPUT_STALE_S = 3.0       # no movement for this long: stop showing the last age
 
 # How long a thread may hold the GIL before it must offer it up. Python's
 # default is 5ms, which is longer than this whole program's latency budget:
@@ -400,22 +401,34 @@ class HOTASState:
             self._axes = dict(axes)
             self._g1   = g1
             self._g2   = g2
-            if stamp is not None:
-                self._stamp = stamp
-                self._stamp_fresh = True
+            # A new state with no trustworthy timestamp must not inherit the
+            # previous input's one, or a fresh movement gets reported with an
+            # old age.
+            self._stamp = stamp
+            self._stamp_fresh = stamp is not None
 
-    def take_input_age(self):
+    def arm_input_clock(self):
+        """Throw away any pending stamp. Called when a client connects: an
+        input made while nothing was polling waited on nobody, and counting
+        that wait as latency is how a freshly connected Xbox reported an
+        eight-second input."""
+        with self._lock:
+            self._stamp = None
+            self._stamp_fresh = False
+
+    def take_input_age(self, limit_ms):
         """Age of the input we just served, in ms — once per genuine input.
 
         Returns None when this poll carried nothing new, which is most of them:
         a poll that repeats an unchanged state isn't late, there's simply
-        nothing newer to send."""
+        nothing newer to send. `limit_ms` rejects anything too old to be a
+        measurement of this link rather than a leftover."""
         with self._lock:
             if not self._stamp_fresh or self._stamp is None:
                 return None
             self._stamp_fresh = False
             age = (time.monotonic() - self._stamp) * 1000.0
-        return age if 0 <= age < 10_000 else None
+        return age if 0 <= age <= limit_ms else None
 
     def set_throttle_targets(self, targets):
         with self._lock:
@@ -870,6 +883,9 @@ def make_handler(state, verbose, telemetry):
         sent_at = None
         worst = collections.deque()      # (when, total_ms) over WORST_WINDOW
         input_ema = None
+        input_at = None                  # when we last measured a real input
+        # Anything the stick did before someone was listening isn't latency.
+        state.arm_input_clock()
 
         try:
             async for msg in websocket:
@@ -901,10 +917,23 @@ def make_handler(state, verbose, telemetry):
                 # How stale was what we just sent? Only a poll that carried a
                 # genuinely new input answers this — the rest are repeats of a
                 # state the Xbox already has.
-                age = state.take_input_age()
+                #
+                # An input can't be older than about one poll period, because
+                # that's how long it can possibly have waited for the Xbox to
+                # ask. Anything well beyond that isn't a measurement of this
+                # link, so it's dropped rather than averaged in.
+                limit = max(250.0, (ema or 0.0) * 4.0)
+                age = state.take_input_age(limit)
                 if age is not None:
                     a = 0.5 if (input_ema is not None and age > input_ema) else 0.2
                     input_ema = age if input_ema is None else ((1 - a) * input_ema + a * age)
+                    input_at = sent_at
+                elif input_at is not None and sent_at - input_at > INPUT_STALE_S:
+                    # Nothing has moved in a while. Rather than leave the last
+                    # reading sitting there as if it were current, drop back to
+                    # the estimate from the link until the stick moves again.
+                    input_ema = None
+                    input_at = None
                 if ema is not None:
                     # Input latency to the Xbox = how long the input waited
                     # here, plus the trip out. The return leg of the round trip
