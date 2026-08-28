@@ -89,14 +89,9 @@ PING_MAX_MS   = 10_000    # above this it's a gap in polling, not latency
 WORST_WINDOW  = 5.0       # seconds of history behind the "worst" latency figure
 INPUT_STALE_S = 3.0       # no movement for this long: stop showing the last age
 
-# How long a thread may hold the GIL before it must offer it up. Python's
-# default is 5ms, which is longer than this whole program's latency budget:
-# whenever any thread does a CPU burst — compiling a layout on a switch,
-# serialising a status response — the reader and the responder can sit behind
-# it for milliseconds. Measured on a busy interpreter, dropping this to 0.5ms
-# takes the median wait for the GIL from 5.2ms to 0.7ms. Nothing here is
-# CPU-bound, so the extra switching costs us nothing.
-GIL_SWITCH_S  = 0.0005
+# Seconds between status updates. The poll loop runs hundreds of times a
+# second; nothing displaying these figures reads them anywhere near that fast.
+REPORT_EVERY_S = 0.1
 
 # EVIOCSCLOCKID — ask the kernel to timestamp input events with CLOCK_MONOTONIC
 # instead of the wall clock, so an event's own timestamp can be compared
@@ -111,6 +106,8 @@ def use_monotonic_timestamps(dev):
         return time.monotonic
     except (OSError, AttributeError, ValueError):
         return time.time      # kernel too old; wall-clock stamps still work
+
+
 AXIS_TARGETS  = ("lx", "ly", "rx", "ry", "lt", "rt")
 SPLIT_TARGET  = "split_lt_rt"
 
@@ -340,6 +337,12 @@ class CaptureService:
     def note_abs(self, code, value):
         """Every axis event, armed or not — keeps the baseline honest."""
         self._last_raw[code] = value
+        # This runs for every event a jittering stick produces, so check the
+        # flag before paying for the lock. A stale read only ever means we skip
+        # the first sample of a capture that is just starting; the next event
+        # picks it up.
+        if not self._armed:
+            return
         with self._lock:
             if not self._armed or self._kind != "axis" or self._result:
                 return
@@ -368,6 +371,8 @@ class CaptureService:
             self._armed = False
 
     def note_key(self, code, value):
+        if not self._armed:
+            return
         with self._lock:
             if not self._armed or self._kind != "button" or self._result:
                 return
@@ -838,9 +843,15 @@ _DSCP_EF   = 46 << 2          # 0xB8
 _SO_PRIO_VO = 6
 
 
-def tune_socket(websocket):
+def tune_socket(websocket, dscp=False):
     """Mark this connection as latency-sensitive. Entirely best-effort: every
-    one of these is an optimisation, none of them is required to work."""
+    one of these is an optimisation, none of them is required to work.
+
+    The DSCP/priority marking is OFF by default. In theory it lifts our frames
+    into a high-priority WMM queue; in practice consumer access points vary —
+    some apply admission control to the voice class and downgrade or police
+    what they see, which can make a link worse rather than better. It's a
+    knob to try (--dscp) and measure on the page, not a default."""
     try:
         sock = websocket.transport.get_extra_info("socket")
     except Exception:
@@ -849,11 +860,13 @@ def tune_socket(websocket):
         return
     # TCP_NODELAY is already set by asyncio, but say so explicitly rather than
     # depend on it: a 100-byte reply must never wait for a coalescing partner.
-    for level, opt, val, what in (
-        (socket.IPPROTO_TCP, getattr(socket, "TCP_NODELAY", None), 1, "nodelay"),
-        (socket.IPPROTO_IP,  getattr(socket, "IP_TOS", None), _DSCP_EF, "dscp"),
-        (socket.SOL_SOCKET,  getattr(socket, "SO_PRIORITY", None), _SO_PRIO_VO, "priority"),
-    ):
+    opts = [(socket.IPPROTO_TCP, getattr(socket, "TCP_NODELAY", None), 1, "nodelay")]
+    if dscp:
+        opts += [
+            (socket.IPPROTO_IP, getattr(socket, "IP_TOS", None), _DSCP_EF, "dscp"),
+            (socket.SOL_SOCKET, getattr(socket, "SO_PRIORITY", None), _SO_PRIO_VO, "priority"),
+        ]
+    for level, opt, val, what in opts:
         if opt is None:
             continue
         try:
@@ -862,14 +875,14 @@ def tune_socket(websocket):
             pass    # SO_PRIORITY needs privileges; IP_TOS is v4-only. Fine.
 
 
-def make_handler(state, verbose, telemetry):
+def make_handler(state, verbose, telemetry, dscp=False):
     hostname = socket.gethostname()
     handshake = bytes([0x0A]) + hostname.encode("utf-8")
 
     async def handler(websocket):
         addr = websocket.remote_address
         print(f"[oberon] connected from {addr[0]}")
-        tune_socket(websocket)
+        tune_socket(websocket, dscp)
         await websocket.send(handshake)
         telemetry.set_connected(True)
 
@@ -881,7 +894,12 @@ def make_handler(state, verbose, telemetry):
         # request keeps our own processing out of the figure.
         ema = None
         sent_at = None
-        worst = collections.deque()      # (when, total_ms) over WORST_WINDOW
+        # Sliding-window maximum, kept as a monotonically decreasing deque so
+        # the front is always the worst of the last WORST_WINDOW seconds.
+        # Scanning the window on every poll instead cost ~30% of a core at a
+        # fast poll rate — 26x the cost of building the packet itself.
+        worst = collections.deque()      # (when, total_ms), decreasing
+        reported_at = 0.0
         input_ema = None
         input_at = None                  # when we last measured a real input
         # Anything the stick did before someone was listening isn't latency.
@@ -941,13 +959,21 @@ def make_handler(state, verbose, telemetry):
                     # input never waits for, so only half the RTT counts.
                     base = input_ema if input_ema is not None else ema / 2.0
                     total = base + ema / 2.0
+                    while worst and worst[-1][1] <= total:
+                        worst.pop()             # can never be the max again
                     worst.append((sent_at, total))
                     cut = sent_at - WORST_WINDOW
                     while worst and worst[0][0] < cut:
                         worst.popleft()
-                    telemetry.set_latency(
-                        input_ms=input_ema, link_ms=ema, total_ms=total,
-                        worst_ms=max(v for _, v in worst) if worst else total)
+                    # Nothing reads this faster than a few times a second (the
+                    # web page every 2.5s, the throttle screen twice a second),
+                    # so publishing it on every poll was pure overhead in the
+                    # one path that has to stay quick.
+                    if sent_at - reported_at >= REPORT_EVERY_S:
+                        reported_at = sent_at
+                        telemetry.set_latency(
+                            input_ms=input_ema, link_ms=ema, total_ms=total,
+                            worst_ms=worst[0][1] if worst else total)
 
                 if verbose:
                     lt = (axes["lt"] + 1) / 2
@@ -980,15 +1006,15 @@ def main():
     ap.add_argument("--list",    action="store_true", help="list input devices and exit")
     ap.add_argument("--probe",   action="store_true", help="print live events and exit")
     ap.add_argument("--verbose", action="store_true")
+    ap.add_argument("--dscp", action="store_true",
+                    help="mark packets DSCP EF / priority 6 to claim a "
+                         "high-priority WiFi queue. Helps on some access "
+                         "points, hurts on others — measure before keeping it")
     ap.add_argument("--menu", action="store_true",
                     help="start with axes SUSPENDED (throttle/sticks frozen) so "
                          "the Xbox dashboard doesn't scroll; press the suspend "
                          "button once in-game to start flying")
     args = ap.parse_args()
-
-    # Before any threads exist: keep one busy thread from holding the GIL long
-    # enough to delay the stick or the reply. See GIL_SWITCH_S.
-    sys.setswitchinterval(GIL_SWITCH_S)
 
     if args.list:
         for path in list_devices():
@@ -1110,7 +1136,7 @@ def main():
             print(f"[web]    disabled ({e})")
 
     async def run():
-        handler = make_handler(state, args.verbose, telemetry)
+        handler = make_handler(state, args.verbose, telemetry, args.dscp)
         # compression=None: the state buffer is ~90% zeros so deflate squeezes
         # it to a few bytes, but 9 bytes and 100 bytes occupy the same single
         # WiFi frame — identical airtime. All it buys is a stateful compress

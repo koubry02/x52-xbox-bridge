@@ -97,7 +97,7 @@ input into the game.
 
   ```
   192.168.1.69       ← Pi IP (enter this in the Oberon app)
-  XBOX:ON    45ms    ← Oberon connected + poll ping
+  XBOX:ON    12ms    ← connected + input latency
   MENU:ON       AC7  ← menu mode  |  active game layout
   ```
 
@@ -127,8 +127,8 @@ http://<pi-ip>:8088
 Three tabs:
 
 - **Status** — which game you're on (big, because that's the question you
-  actually have), Oberon connected or not, poll ping, uptime, and a menu-mode
-  switch.
+  actually have), Oberon connected or not, input latency, uptime, and a
+  menu-mode switch.
 - **Layouts** — activate, edit, duplicate or delete any layout.
 - **Editor** — bindings as a plain list you can read at a glance
   (`Main trigger → B`), one row per control, per mode-dial layer. Inherited rows
@@ -374,19 +374,23 @@ one thing at a time and watch the numbers move — and watch the **worst in the
 last 5s** figure as much as the average, because a single 200 ms spike mid-turn
 is what you actually feel.
 
-A note on the Python side: the interpreter's default GIL switch interval is
-5 ms, which is longer than this program's whole latency budget — one thread
-doing a burst of work could delay the stick or the reply by more than the
-network does. The server drops it to 0.5 ms at startup, which measured an 8×
-improvement in how long a thread waits to be scheduled under load. The
-throttle-screen thread also runs at a lower priority than the input path, so
-its display updates can never outrank your controls.
+The throttle-screen thread runs at a lower priority than the input path, so
+its display updates can never outrank your controls. Beyond that the poll
+loop is kept deliberately bare: it does the measurement arithmetic and
+nothing else, and publishes status to the screen and the web page ten times
+a second rather than on every one of the several hundred polls.
 
 **Bandwidth is a non-issue** — the whole link runs at about 0.4 Mbps. There is
-nothing to save there, so the bridge spends its effort on *consistency*
-instead: packets are marked DSCP EF and priority 6 so WiFi puts them in a
-high-priority queue rather than behind someone's download, and WebSocket
-compression is off because 9 bytes and 100 bytes occupy the same radio frame.
+nothing to save there, so the bridge spends its effort on *consistency*:
+WebSocket compression is off, because 9 bytes and 100 bytes occupy the same
+radio frame and compressing every packet only adds work on the critical path.
+
+There is also a `--dscp` flag, which marks packets DSCP EF / priority 6 to
+claim a high-priority WiFi queue. It is **off by default** on purpose: access
+points differ, and some apply admission control to the voice class and
+downgrade or police what they see, which can make a link worse. If you want
+to try it, add it to the service's `ExecStart` and watch the numbers on the
+web page before and after.
 
 ---
 
