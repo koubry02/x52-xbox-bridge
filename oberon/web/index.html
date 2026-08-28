@@ -461,13 +461,17 @@ textarea { min-height: 300px; resize: vertical; font-family: ui-monospace, monos
 /* Where the code comes from. Small, quiet, and always visible — you should be
    able to see at a glance that the board is still pulling from the project and
    not from somewhere you don't recognise. */
-.srcrow { display: flex; align-items: center; gap: 10px; margin-top: 14px;
+.srcrow { display: flex; align-items: center; gap: 12px; margin-top: 14px;
           padding-top: 13px; border-top: 1px solid var(--line-soft); }
+.srcrow .txt { flex: 1; min-width: 0; }
 .srcrow .s1 { font-family: inherit; font-weight: 600; font-size: 10px; line-height: 1;
-              text-transform: uppercase; letter-spacing: .13em; color: var(--txt-3); flex: none; }
-.srcrow .s2 { flex: 1; font-size: 11.5px; color: var(--txt-2); min-width: 0;
+              text-transform: uppercase; letter-spacing: .13em; color: var(--txt-3); }
+.srcrow .s2 { margin-top: 5px; font-size: 12px; color: var(--txt-2);
               overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .srcrow .s2.custom { color: var(--amber); }
+/* A long commit subject shouldn't push the whole card down the page. */
+#u-ver { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+         overflow: hidden; }
 
 .note { color: var(--txt-3); font-size: 12px; line-height: 1.6; margin: 11px 2px 0; }
 .note code { background: var(--surface-2); border-radius: var(--r-xs); padding: 1px 5px;
@@ -612,8 +616,10 @@ textarea { min-height: 300px; resize: vertical; font-family: ui-monospace, monos
       </div>
       <div class="ulog mono" id="u-log" style="display:none"></div>
       <div class="srcrow">
-        <div class="s1">Updates come from</div>
-        <div class="s2 mono" id="u-src">—</div>
+        <div class="txt">
+          <div class="s1">Updates come from</div>
+          <div class="s2 mono" id="u-src">—</div>
+        </div>
         <button class="btn sm ghost" id="u-srcedit">Change</button>
       </div>
       <p class="note" id="u-note">Pulls from the project's repository, checks the
