@@ -236,16 +236,117 @@ class Telemetry:
         if self.mfd: self.mfd.set_led_brightness(lvl)
 
 
+# ─── Learn-a-control capture ─────────────────────────────────────────────────
+
+class CaptureService:
+    """Lets the web UI learn a control by having you work it on the stick.
+
+    The UI arms this, you press a button or move an axis, and the next such
+    event is reported back by name — no more hunting through --probe output.
+
+    While armed the controller output is MUTED (see HOTASState.snapshot), so
+    pressing buttons to identify them can't fire a shot or scroll a menu on
+    the Xbox.
+    """
+
+    TIMEOUT   = 25.0    # seconds before an armed capture gives up
+    AXIS_MOVE = 0.22    # fraction of full travel that counts as "moved"
+
+    def __init__(self, absinfo):
+        self._lock     = threading.Lock()
+        self._absinfo  = absinfo
+        self._last_raw = {}      # axis code -> latest raw value, always tracked
+        self._armed    = False
+        self._kind     = None    # "button" | "axis"
+        self._deadline = 0.0
+        self._baseline = {}      # axis code -> raw value when armed
+        self._result   = None
+
+    # ---- control (web thread) ----
+    def arm(self, kind):
+        with self._lock:
+            self._armed    = True
+            self._kind     = kind
+            self._result   = None
+            self._deadline = time.monotonic() + self.TIMEOUT
+            self._baseline = dict(self._last_raw)
+
+    def cancel(self):
+        with self._lock:
+            self._armed  = False
+            self._kind   = None
+            self._result = None
+
+    def armed(self):
+        with self._lock:
+            return self._armed and time.monotonic() < self._deadline
+
+    def status(self):
+        with self._lock:
+            if self._result:
+                return {"state": "detected", **self._result}
+            if self._armed:
+                left = self._deadline - time.monotonic()
+                if left <= 0:
+                    self._armed = False
+                    return {"state": "timeout", "kind": self._kind}
+                return {"state": "listening", "kind": self._kind,
+                        "seconds_left": int(left) + 1}
+            return {"state": "idle"}
+
+    # ---- event feed (reader thread) ----
+    def note_abs(self, code, value):
+        """Every axis event, armed or not — keeps the baseline honest."""
+        self._last_raw[code] = value
+        with self._lock:
+            if not self._armed or self._kind != "axis" or self._result:
+                return
+            if time.monotonic() >= self._deadline:
+                return
+            info = self._absinfo.get(code)
+            if info is None:
+                return
+            if code not in self._baseline:
+                # First we've heard from this axis — a rotary nobody has touched
+                # since boot has sent nothing yet. Take this as its resting
+                # value and measure the sweep from here.
+                self._baseline[code] = value
+                return
+            span = (info.max - info.min) or 1
+            if abs(value - self._baseline[code]) / span < self.AXIS_MOVE:
+                return
+            base = self._baseline[code]
+            self._result = {
+                "kind": "axis", "code": code,
+                "name": code_name(ecodes.EV_ABS, code),
+                "raw": value, "min": info.min, "max": info.max,
+                # Which way it was worked — lets the UI pre-tick "invert".
+                "direction": 1 if value > base else -1,
+            }
+            self._armed = False
+
+    def note_key(self, code, value):
+        with self._lock:
+            if not self._armed or self._kind != "button" or self._result:
+                return
+            if value != 1 or time.monotonic() >= self._deadline:
+                return
+            self._result = {"kind": "button", "code": code,
+                            "name": code_name(ecodes.EV_KEY, code)}
+            self._armed = False
+
+
 # ─── Thread-safe HOTAS state ─────────────────────────────────────────────────
 
 class HOTASState:
-    def __init__(self, throttle_targets=()):
+    def __init__(self, throttle_targets=(), capture=None):
         self._lock = threading.Lock()
         self._axes = neutral_axes()
         self._g1 = 0
         self._g2 = 0
         self._suspended = False
         self._throttle_targets = tuple(throttle_targets)
+        self._capture = capture
 
     def update(self, axes, g1, g2):
         with self._lock:
@@ -271,6 +372,10 @@ class HOTASState:
             return self._suspended
 
     def snapshot(self):
+        # While the web UI is learning a control, send nothing at all: you're
+        # pressing buttons to find out what they are, not to play.
+        if self._capture is not None and self._capture.armed():
+            return neutral_axes(), 0, 0
         with self._lock:
             axes = dict(self._axes)
             if self._suspended:
@@ -455,12 +560,13 @@ class LayoutManager:
 
 # ─── evdev reader (runs in daemon thread) ────────────────────────────────────
 
-def evdev_reader(dev, mgr, state, telemetry, verbose=False):
+def evdev_reader(dev, mgr, state, telemetry, verbose=False, capture=None):
     m = None                    # current Mappings; reset state when it changes
     axes = pressed = hat = axis_st = None
     mode = 1
     _last_bri = -1
     _last_led_bri = -1
+    was_capturing = False
 
     def reset_local():
         nonlocal axes, pressed, hat, axis_st, mode
@@ -479,6 +585,19 @@ def evdev_reader(dev, mgr, state, telemetry, verbose=False):
                     m = mgr.m
                     reset_local()
                     state.update(axes, 0, 0)    # publish neutral immediately
+
+                if capture is not None:
+                    if ev.type == ecodes.EV_ABS:
+                        capture.note_abs(ev.code, ev.value)
+                    elif ev.type == ecodes.EV_KEY:
+                        capture.note_key(ev.code, ev.value)
+                    capturing = capture.armed()
+                    if was_capturing and not capturing:
+                        # Just finished learning a control: drop whatever is
+                        # held so the button you pressed to identify it doesn't
+                        # register as a real input the moment output resumes.
+                        pressed.clear()
+                    was_capturing = capturing
 
                 if ev.type == ecodes.EV_ABS:
                     if ev.code in m.axis_cfg:
@@ -735,7 +854,8 @@ def main():
             legacy_config=args.config)
     telemetry = Telemetry(hub, mfd)
 
-    state = HOTASState()
+    capture = CaptureService(absinfo)
+    state = HOTASState(capture=capture)
     state.set_suspended(args.menu)   # --menu starts with the throttle frozen
 
     mgr = LayoutManager(layouts_dir, absinfo, state, telemetry)
@@ -756,7 +876,7 @@ def main():
 
     threading.Thread(
         target=evdev_reader,
-        args=(dev, mgr, state, telemetry, args.verbose),
+        args=(dev, mgr, state, telemetry, args.verbose, capture),
         daemon=True
     ).start()
 
@@ -767,7 +887,7 @@ def main():
     if web_port:
         try:
             import webapp
-            webapp.start(web_port, hub, mgr, state, telemetry)
+            webapp.start(web_port, hub, mgr, state, telemetry, capture)
             print(f"[web]    layout editor + status: http://{local_ip}:{web_port}")
         except Exception as e:
             print(f"[web]    disabled ({e})")

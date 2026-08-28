@@ -114,28 +114,56 @@ The choice is remembered across restarts (in `layouts/.active`).
 
 ## The web app
 
-Every board runs a small status page and layout editor on **port 8088**, reachable
-from any browser on the same network:
+Every board runs a status page and layout editor on **port 8088**, reachable from
+any browser on the same network — phone included, which is the point: you sit at
+the stick with your phone and map it.
 
 ```
 http://<pi-ip>:8088
 ```
 
-It gives you:
+Three tabs:
 
-- **Live status** — Oberon connected or not, poll ping, menu mode (with a toggle),
-  active layout, uptime, and the stick it found.
-- **Layout list** — activate, edit, duplicate, or delete any layout.
-- **A layout editor** — a form for axes, buttons (per mode-dial layer), and the
-  special buttons, plus a raw-JSON view for when you'd rather just type. It
-  validates before saving and tells you exactly what's wrong if it won't take.
-  Saving the *active* layout re-applies it live — no restart, no reconnect.
-- **A resolved preview** showing the final layout with inheritance applied, so
-  you can see what you actually inherited.
+- **Status** — which game you're on (big, because that's the question you
+  actually have), Oberon connected or not, poll ping, uptime, and a menu-mode
+  switch.
+- **Layouts** — activate, edit, duplicate or delete any layout.
+- **Editor** — bindings as a plain list you can read at a glance
+  (`Main trigger → B`), one row per control, per mode-dial layer. Inherited rows
+  are drawn dashed, so you can always see the whole effective mapping and what
+  came from where. Axes get sliders for deadzone and expo rather than typing
+  numbers. There's a raw-JSON view and a resolved preview under Advanced.
 
-> **No password.** Anyone on your LAN can edit layouts and toggle menu mode.
-> That's deliberate — it's a tool for your own network. Don't port-forward it.
-> To turn it off entirely, add `--web-port 0` to the service's `ExecStart`.
+Saving the *active* layout re-applies it live — no restart, no reconnect. Nothing
+is written until it validates.
+
+### Mapping by pressing the thing
+
+You don't have to know that the pinkie trigger is `BTN_PINKIE`. Tap **Add a
+button**, and the bridge listens:
+
+1. Press the button (or sweep the axis) you want to map.
+2. It tells you what you touched — *Pinkie trigger · BTN_PINKIE*.
+3. Pick what it should do on the Xbox from a grid of real controller buttons.
+
+**Output to the Xbox is paused while it's listening**, so pressing buttons to
+identify them can't fire a shot or scroll the dashboard. Anything you were
+holding is dropped when it stops, so nothing leaks through afterwards.
+
+Pick **more than one** target to press them together — that's how Ace Combat's
+flares (LS + RS) and its high-G turn (LT + RT) are built.
+
+Axes offer one extra path: **use it as buttons**, which walks you through "what
+should this do one way / the other way". That's the AC7 twist-as-yaw mapping,
+and it works for any axis you'd rather have behave like a bumper pair.
+
+The same listen-and-learn flow sets the menu-freeze and layout-switch buttons
+under **Setup → Special buttons**.
+
+> **No password.** Anyone on your LAN can edit layouts, toggle menu mode and
+> briefly pause the controller output. That's deliberate — it's a tool for your
+> own network. Don't port-forward it. To turn it off entirely, add
+> `--web-port 0` to the service's `ExecStart`.
 
 ---
 
@@ -346,9 +374,10 @@ shows all the same status.
 
 ## Making your own layout
 
-Easiest path: open `http://<pi-ip>:8088`, hit **Duplicate** on whichever layout
-is closest, change what you want, **Save**. If you're editing the layout that's
-currently active, it re-applies immediately — no restart.
+Easiest path: open `http://<pi-ip>:8088` on your phone, hit **Duplicate** on
+whichever layout is closest, then map controls by pressing them (see above).
+**Save**. If you're editing the layout that's currently active, it re-applies
+immediately — no restart.
 
 By hand, drop a file in `layouts/`:
 
@@ -378,13 +407,13 @@ layouts you created).
 mode. Start the service (it boots in menu mode), press the E button, or hit the
 toggle on the web page.
 
-**A control does the wrong thing.** Your stick's codes don't match the layout —
-re-run the calibration wizard, or open the web editor and check the axis
-targets against `--probe` output.
+**A control does the wrong thing.** Your stick's codes may not match the layout.
+Open the web editor, tap **Add a button**, and press the control — it'll tell you
+what your unit actually calls it, and you can bind it right there.
 
-**Pitch is backwards.** Flip `invert` on the pitch axis in the web editor and
-save — it applies live. Which way "correct" is depends on the game and on your
-unit; one click either way.
+**Pitch is backwards.** Open the axis in the web editor and flip **Invert** — it
+applies live on save. Which way is "correct" depends on the game and on your
+unit, so it's deliberately not guessed for you; it's one tap either way.
 
 **I don't know which layout I'm on.** Look at the throttle screen's bottom line,
 or the web page, or `journalctl -u hotas-oberon -f` (it logs every switch).

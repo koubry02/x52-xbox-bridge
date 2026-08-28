@@ -8,12 +8,15 @@ from any browser on the same network.
 API:
   GET  /api/status                 live bridge status + layout list
   GET  /api/layouts                layout summaries
-  GET  /api/layouts/<name>         {"raw": file-as-written, "resolved": merged}
+  GET  /api/layouts/<name>         {"raw", "resolved", "inherited"}
   PUT  /api/layouts/<name>         save (validated); re-applies live if active
   DELETE /api/layouts/<name>       delete (refused for default / inherited-from)
   POST /api/activate  {"name"}     switch the active layout now
   POST /api/menu      {"on"}       toggle menu mode (throttle freeze)
   GET  /api/codes                  known evdev axis/button names for pickers
+  POST /api/capture   {"kind"}     listen for the next button press / axis move
+  GET  /api/capture                what it heard (idle/listening/detected)
+  DELETE /api/capture              stop listening
 
 No auth: everyone on your LAN can edit layouts and poke menu mode. That is
 the point of the tool — don't expose the port to the internet.
@@ -45,7 +48,7 @@ def _known_codes():
     return {"axes": axes, "buttons": btns}
 
 
-def start(port, hub, mgr, state, telemetry):
+def start(port, hub, mgr, state, telemetry, capture=None):
     """Start the web server in a daemon thread. Returns the thread."""
 
     codes = _known_codes()
@@ -103,6 +106,11 @@ def start(port, hub, mgr, state, telemetry):
             if self.path == "/api/layouts":
                 return self._send(200, self._summaries())
 
+            if self.path == "/api/capture":
+                if capture is None:
+                    return self._err(503, "capture unavailable")
+                return self._send(200, capture.status())
+
             if self.path == "/api/codes":
                 return self._send(200, {
                     **codes,
@@ -157,6 +165,12 @@ def start(port, hub, mgr, state, telemetry):
 
         # ---- DELETE ----
         def do_DELETE(self):
+            if self.path == "/api/capture":
+                if capture is None:
+                    return self._err(503, "capture unavailable")
+                capture.cancel()
+                return self._send(200, {"state": "idle"})
+
             name = self._layout_name()
             if not name:
                 return self._err(404, "DELETE /api/layouts/<name>")
@@ -172,6 +186,18 @@ def start(port, hub, mgr, state, telemetry):
 
         # ---- POST ----
         def do_POST(self):
+            if self.path == "/api/capture":
+                if capture is None:
+                    return self._err(503, "capture unavailable")
+                try:
+                    kind = self._body_json().get("kind")
+                except ValueError as e:
+                    return self._err(400, f"bad JSON: {e}")
+                if kind not in ("button", "axis"):
+                    return self._err(400, "kind must be 'button' or 'axis'")
+                capture.arm(kind)
+                return self._send(200, capture.status())
+
             if self.path == "/api/activate":
                 try:
                     name = self._body_json().get("name", "")

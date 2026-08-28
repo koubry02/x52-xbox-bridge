@@ -176,6 +176,8 @@ def _validate_body(cfg):
         problems.append("'axes' must be an object")
         axes = {}
     for axis, acfg in axes.items():
+        if acfg is None:
+            continue        # deletion marker; deep_merge removes the whole axis
         if not isinstance(acfg, dict):
             problems.append(f"axis {axis}: must be an object")
             continue
@@ -206,6 +208,8 @@ def _validate_body(cfg):
             problems.append(f"{mode_name}: must be an object")
             continue
         for bname, target in bmap.items():
+            if target is None:
+                continue    # deletion marker; deep_merge drops the binding
             if not _valid_button_target(target):
                 problems.append(f"{mode_name}.{bname}: bad target '{target}'")
 

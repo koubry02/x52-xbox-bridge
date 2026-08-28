@@ -2,487 +2,1437 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0A0D11">
 <title>HOTAS Bridge</title>
 <style>
-  :root {
-    --bg: #0f1216; --panel: #171c22; --panel2: #1e252d; --line: #2a333d;
-    --txt: #d7dee6; --dim: #8b98a5; --acc: #4db6ac; --amber: #ffb74d;
-    --red: #e57373; --green: #81c784;
+/* ═══ tokens ══════════════════════════════════════════════════════════════ */
+:root {
+  --bg:        #0A0D11;
+  --bg-soft:   #0F141A;
+  --surface:   #141A22;
+  --surface-2: #1B232D;
+  --surface-3: #232D39;
+  --line:      #26313D;
+  --line-soft: #1D2731;
+  --txt:       #E7EEF6;
+  --txt-2:     #A7B4C2;
+  --txt-3:     #6F7E8D;
+  --accent:    #2DD4BF;
+  --accent-2:  #14B8A6;
+  --accent-ink:#04201D;
+  --amber:     #FBBF24;
+  --green:     #34D399;
+  --red:       #F87171;
+  --blue:      #60A5FA;
+
+  --xa: #6CC24A; --xb: #E4413B; --xx: #3A7DD8; --xy: #F2C230;
+
+  --r-sm: 8px; --r: 12px; --r-lg: 16px; --r-xl: 22px;
+  --sp: 4px;
+  --tap: 46px;
+  --ease: cubic-bezier(.22,.61,.36,1);
+  --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px -12px rgba(0,0,0,.7);
+  --nav-h: 62px;
+}
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body { overscroll-behavior-y: none; }
+body {
+  margin: 0; background: var(--bg); color: var(--txt);
+  font: 400 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+        "Helvetica Neue", Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  padding-bottom: calc(var(--nav-h) + env(safe-area-inset-bottom));
+}
+/* The save bar floats above the nav; without this the last row of the list
+   sits underneath it and can't be reached on a phone. */
+body.saving { padding-bottom: calc(var(--nav-h) + 66px + env(safe-area-inset-bottom)); }
+.mono { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+::selection { background: var(--accent); color: var(--accent-ink); }
+
+/* ═══ chrome ══════════════════════════════════════════════════════════════ */
+.topbar {
+  position: sticky; top: 0; z-index: 40;
+  display: flex; align-items: center; gap: 10px;
+  padding: calc(env(safe-area-inset-top) + 11px) 16px 11px;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: saturate(1.6) blur(14px);
+  border-bottom: 1px solid var(--line-soft);
+}
+.brand { display: flex; align-items: center; gap: 9px; font-weight: 650;
+         letter-spacing: .02em; font-size: 15px; }
+.brand .mark {
+  width: 24px; height: 24px; flex: none; border-radius: 7px;
+  background: linear-gradient(140deg, var(--accent), #0E7490);
+  display: grid; place-items: center; color: var(--accent-ink);
+  font-size: 13px; font-weight: 800;
+}
+.linkpill {
+  margin-left: auto; display: inline-flex; align-items: center; gap: 7px;
+  font-size: 12.5px; color: var(--txt-2); background: var(--surface);
+  border: 1px solid var(--line); border-radius: 999px; padding: 5px 11px;
+  max-width: 50vw; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+}
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--txt-3); flex: none; }
+.dot.on  { background: var(--green); box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 22%, transparent); }
+.dot.off { background: var(--amber); box-shadow: 0 0 0 3px color-mix(in srgb, var(--amber) 20%, transparent); }
+
+main { max-width: 860px; margin: 0 auto; padding: 16px 16px 28px; }
+.view { display: none; animation: fade .22s var(--ease); }
+.view.on { display: block; }
+@keyframes fade { from { opacity: 0; transform: translateY(6px); } }
+
+h2.sec {
+  font-size: 11.5px; text-transform: uppercase; letter-spacing: .13em;
+  color: var(--txt-3); font-weight: 650; margin: 26px 0 10px;
+}
+h2.sec:first-child { margin-top: 4px; }
+
+/* ═══ bottom nav ══════════════════════════════════════════════════════════ */
+.nav {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 50;
+  display: grid; grid-template-columns: repeat(3, 1fr);
+  background: color-mix(in srgb, var(--bg-soft) 94%, transparent);
+  backdrop-filter: saturate(1.6) blur(16px);
+  border-top: 1px solid var(--line);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+.nav button {
+  appearance: none; background: none; border: 0; cursor: pointer;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 3px; height: var(--nav-h); color: var(--txt-3);
+  font: 600 11px/1 inherit; letter-spacing: .03em;
+  transition: color .16s var(--ease);
+}
+.nav button svg { width: 21px; height: 21px; stroke-width: 1.9; }
+.nav button.on { color: var(--accent); }
+.nav .badge {
+  position: absolute; transform: translate(15px, -13px);
+  width: 7px; height: 7px; border-radius: 50%; background: var(--amber);
+}
+
+/* ═══ cards ═══════════════════════════════════════════════════════════════ */
+.card {
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--r-lg); padding: 15px;
+}
+.stack { display: flex; flex-direction: column; gap: 10px; }
+
+.hero {
+  background:
+    radial-gradient(120% 140% at 8% 0%, color-mix(in srgb, var(--accent) 13%, transparent), transparent 62%),
+    var(--surface);
+  border: 1px solid var(--line); border-radius: var(--r-xl);
+  padding: 20px; position: relative; overflow: hidden;
+}
+.hero .lbl { font-size: 11.5px; text-transform: uppercase; letter-spacing: .13em;
+             color: var(--txt-3); font-weight: 650; }
+.hero .game { font-size: 30px; font-weight: 700; letter-spacing: -.02em;
+              margin: 7px 0 2px; line-height: 1.12; }
+.hero .sub { color: var(--txt-2); font-size: 13.5px; }
+.hero .mfd {
+  display: inline-flex; align-items: center; gap: 7px; margin-top: 14px;
+  background: #071410; border: 1px solid #14532D; color: #4ADE80;
+  border-radius: var(--r-sm); padding: 7px 11px; font-size: 13px;
+  letter-spacing: .06em; box-shadow: inset 0 0 22px rgba(74,222,128,.09);
+}
+
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.stat { background: var(--surface); border: 1px solid var(--line);
+        border-radius: var(--r); padding: 13px 14px; }
+.stat .k { font-size: 11px; text-transform: uppercase; letter-spacing: .1em;
+           color: var(--txt-3); font-weight: 650; }
+.stat .v { font-size: 19px; margin-top: 5px; font-weight: 600; letter-spacing: -.01em; }
+.stat .v small { font-size: 12.5px; color: var(--txt-3); font-weight: 500; }
+.ok { color: var(--green); } .warn { color: var(--amber); } .bad { color: var(--red); }
+
+/* toggle row */
+.trow { display: flex; align-items: center; gap: 14px; }
+.trow .txt { flex: 1; min-width: 0; }
+.trow .t1 { font-weight: 600; }
+.trow .t2 { color: var(--txt-2); font-size: 13px; margin-top: 2px; }
+.switch {
+  --w: 52px; flex: none; width: var(--w); height: 31px; border-radius: 999px;
+  background: var(--surface-3); border: 1px solid var(--line); position: relative;
+  cursor: pointer; transition: background .2s var(--ease), border-color .2s var(--ease);
+  appearance: none; padding: 0;
+}
+.switch::after {
+  content: ""; position: absolute; top: 3px; left: 3px; width: 23px; height: 23px;
+  border-radius: 50%; background: var(--txt-2);
+  transition: transform .22s var(--ease), background .2s var(--ease);
+}
+.switch[aria-checked="true"] { background: color-mix(in srgb, var(--accent) 26%, var(--surface-3)); border-color: var(--accent); }
+.switch[aria-checked="true"]::after { transform: translateX(21px); background: var(--accent); }
+/* Amber is reserved for menu mode, so the one switch that means "frozen"
+   reads the same colour as the LEDs on the stick and the MFD line. */
+.switch.amber[aria-checked="true"] { background: color-mix(in srgb, var(--amber) 30%, var(--surface-3)); border-color: var(--amber); }
+.switch.amber[aria-checked="true"]::after { background: var(--amber); }
+
+/* ═══ buttons ═════════════════════════════════════════════════════════════ */
+.btn {
+  appearance: none; font: 600 14px/1 inherit; cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+  min-height: var(--tap); padding: 0 17px; border-radius: var(--r);
+  background: var(--surface-2); color: var(--txt); border: 1px solid var(--line);
+  transition: background .15s var(--ease), border-color .15s var(--ease), transform .09s var(--ease);
+}
+.btn:active { transform: scale(.975); }
+.btn:hover { background: var(--surface-3); }
+.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.btn.primary:hover { background: var(--accent-2); }
+.btn.ghost { background: transparent; }
+.btn.danger { color: var(--red); border-color: color-mix(in srgb, var(--red) 34%, var(--line)); }
+.btn.danger:hover { background: color-mix(in srgb, var(--red) 12%, transparent); }
+.btn.sm { min-height: 36px; padding: 0 13px; font-size: 13px; border-radius: var(--r-sm); }
+.btn.block { width: 100%; }
+.btn.dashed { border-style: dashed; border-color: var(--line);
+              color: var(--txt-2); background: transparent; }
+.btn.dashed:hover { color: var(--accent); border-color: var(--accent); }
+.btn svg { width: 17px; height: 17px; stroke-width: 2.1; flex: none; }
+.btn[disabled] { opacity: .45; pointer-events: none; }
+.btnrow { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* ═══ layout list ═════════════════════════════════════════════════════════ */
+.lay {
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--r-lg); padding: 14px 15px; position: relative;
+  transition: border-color .16s var(--ease);
+}
+.lay.active { border-color: var(--accent);
+              box-shadow: 0 0 0 1px var(--accent), 0 0 30px -12px var(--accent); }
+.lay .top { display: flex; align-items: center; gap: 10px; }
+.lay .nm { font-weight: 650; font-size: 16px; letter-spacing: -.01em; flex: 1; min-width: 0;
+           overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lay .meta { color: var(--txt-3); font-size: 12.5px; margin-top: 3px; }
+.lay .acts { display: flex; gap: 7px; margin-top: 12px; flex-wrap: wrap; }
+.tag {
+  font-size: 10.5px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase;
+  padding: 4px 9px; border-radius: 999px; flex: none;
+}
+.tag.live { background: var(--accent); color: var(--accent-ink); }
+.tag.inh  { background: var(--surface-3); color: var(--txt-3); letter-spacing: .06em; }
+
+/* ═══ binding rows ════════════════════════════════════════════════════════ */
+.bind {
+  display: flex; align-items: center; gap: 12px; width: 100%;
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--r); padding: 11px 13px; min-height: 62px;
+  cursor: pointer; text-align: left; font: inherit; color: inherit;
+  transition: border-color .15s var(--ease), background .15s var(--ease);
+}
+.bind:hover { border-color: var(--surface-3); background: var(--surface-2); }
+.bind:active { transform: scale(.993); }
+.bind.inherited { background: transparent; border-style: dashed; }
+.bind.inherited .src, .bind.inherited .arrow { opacity: .62; }
+.bind .src { flex: 1; min-width: 0; }
+.bind .src .n { display: block; font-weight: 600; font-size: 14.5px; overflow: hidden;
+                text-overflow: ellipsis; white-space: nowrap; }
+.bind .src .c { display: block; color: var(--txt-3); font-size: 11.5px; margin-top: 3px;
+                overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bind .arrow { color: var(--txt-3); flex: none; }
+.bind .tgt { flex: none; display: flex; gap: 5px; align-items: center; flex-wrap: wrap;
+             justify-content: flex-end; max-width: 46%; }
+.empty {
+  text-align: center; color: var(--txt-3); padding: 34px 18px; font-size: 14px;
+  border: 1px dashed var(--line); border-radius: var(--r-lg);
+}
+.empty b { display: block; color: var(--txt-2); font-size: 15px; margin-bottom: 5px; }
+
+/* ═══ xbox glyphs ═════════════════════════════════════════════════════════ */
+.xb {
+  display: inline-flex; align-items: center; justify-content: center;
+  font: 700 12px/1 ui-monospace, monospace; letter-spacing: .02em;
+  border-radius: var(--r-sm); padding: 6px 9px; min-width: 32px; height: 28px;
+  background: var(--surface-3); color: var(--txt); border: 1px solid var(--line);
+  white-space: nowrap;
+}
+.xb.face { border-radius: 50%; width: 28px; min-width: 28px; padding: 0;
+           font-size: 13px; font-weight: 800; color: #08130C; border: 0; }
+.xb.f-a { background: var(--xa); } .xb.f-b { background: var(--xb); color: #1A0605; }
+.xb.f-x { background: var(--xx); color: #041020; } .xb.f-y { background: var(--xy); color: #1A1303; }
+/* triggers read as a shoulder shape — enough to hint at it, not a dome */
+.xb.trig { border-radius: 13px 13px var(--r-sm) var(--r-sm); }
+.xb.bump { border-radius: 999px; }
+.xb.none { background: transparent; border-style: dashed; color: var(--txt-3); }
+.xb.big  { height: 36px; min-width: 40px; font-size: 13px; padding: 8px 12px; }
+.xb.big.face { width: 36px; min-width: 36px; font-size: 15px; padding: 0; }
+
+/* ═══ chips (picker) ══════════════════════════════════════════════════════ */
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip {
+  appearance: none; cursor: pointer; font: 600 13px/1 inherit; color: var(--txt);
+  background: var(--surface-2); border: 1.5px solid var(--line);
+  border-radius: var(--r); min-height: var(--tap); padding: 0 13px;
+  display: inline-flex; align-items: center; gap: 8px;
+  transition: border-color .14s var(--ease), background .14s var(--ease), transform .09s;
+}
+.chip:hover { border-color: var(--surface-3); }
+.chip:active { transform: scale(.96); }
+.chip[aria-pressed="true"] {
+  border-color: var(--accent); background: color-mix(in srgb, var(--accent) 15%, var(--surface-2));
+}
+.chip[aria-pressed="true"]::after { content: "✓"; color: var(--accent); font-size: 13px; }
+.chip .lbl2 { color: var(--txt-3); font-weight: 500; font-size: 12px; }
+
+/* ═══ sheet ═══════════════════════════════════════════════════════════════ */
+.scrim {
+  position: fixed; inset: 0; z-index: 60; background: rgba(3,6,10,.72);
+  backdrop-filter: blur(3px); display: none; align-items: flex-end; justify-content: center;
+}
+.scrim.on { display: flex; animation: fade .18s var(--ease); }
+.sheet {
+  width: 100%; max-width: 560px; max-height: 92vh; overflow-y: auto;
+  background: var(--bg-soft); border: 1px solid var(--line);
+  border-radius: var(--r-xl) var(--r-xl) 0 0;
+  padding: 8px 16px calc(20px + env(safe-area-inset-bottom));
+  animation: rise .3s var(--ease); box-shadow: var(--shadow);
+}
+@keyframes rise { from { transform: translateY(100%); } }
+.grab { width: 38px; height: 4px; border-radius: 99px; background: var(--surface-3);
+        margin: 6px auto 14px; }
+.sheet h3 { margin: 0 0 4px; font-size: 19px; font-weight: 680; letter-spacing: -.02em; }
+.sheet .lead { color: var(--txt-2); font-size: 13.5px; margin: 0 0 16px; }
+.sheet .grp { margin-bottom: 16px; }
+.sheet .grp > .gl { font-size: 11px; text-transform: uppercase; letter-spacing: .12em;
+                    color: var(--txt-3); font-weight: 650; margin-bottom: 8px; }
+
+/* listening animation */
+.listen { text-align: center; padding: 18px 0 6px; }
+.pulse { width: 132px; height: 132px; margin: 0 auto 20px; position: relative;
+         display: grid; place-items: center; }
+.pulse i {
+  position: absolute; inset: 0; border-radius: 50%;
+  border: 2px solid var(--accent); opacity: 0; animation: ring 2.1s var(--ease) infinite;
+}
+.pulse i:nth-child(2) { animation-delay: .7s; }
+.pulse i:nth-child(3) { animation-delay: 1.4s; }
+@keyframes ring {
+  0%   { transform: scale(.42); opacity: .85; }
+  100% { transform: scale(1);   opacity: 0; }
+}
+.pulse .core {
+  width: 62px; height: 62px; border-radius: 50%; z-index: 1;
+  background: color-mix(in srgb, var(--accent) 17%, var(--surface));
+  border: 1.5px solid var(--accent); display: grid; place-items: center;
+  color: var(--accent);
+}
+.pulse .core svg { width: 27px; height: 27px; stroke-width: 1.9; }
+.listen .big { font-size: 17.5px; font-weight: 650; letter-spacing: -.01em; }
+.listen .small { color: var(--txt-2); font-size: 13.5px; margin-top: 6px; }
+.listen .count { color: var(--txt-3); font-size: 12.5px; margin-top: 12px; }
+
+.found {
+  display: flex; align-items: center; gap: 13px; background: var(--surface);
+  border: 1px solid var(--accent); border-radius: var(--r); padding: 13px 15px;
+  margin-bottom: 18px;
+  box-shadow: 0 0 26px -14px var(--accent);
+  animation: pop .3s var(--ease);
+}
+@keyframes pop { from { transform: scale(.94); opacity: 0; } }
+.found .ico { width: 34px; height: 34px; border-radius: 50%; flex: none;
+              background: color-mix(in srgb, var(--accent) 18%, transparent);
+              display: grid; place-items: center; color: var(--accent); }
+.found .ico svg { width: 19px; height: 19px; stroke-width: 2.2; }
+.found .n { font-weight: 650; font-size: 15.5px; display: block; }
+.found .c { color: var(--txt-3); font-size: 12px; margin-top: 2px; display: block; }
+
+/* ═══ form bits ═══════════════════════════════════════════════════════════ */
+.field { margin-bottom: 14px; }
+.field > label { display: block; font-size: 12.5px; color: var(--txt-2);
+                 margin-bottom: 6px; font-weight: 550; }
+input[type=text], input[type=number], select, textarea {
+  width: 100%; background: var(--surface); color: var(--txt);
+  border: 1px solid var(--line); border-radius: var(--r);
+  padding: 12px 13px; font: inherit; min-height: var(--tap);
+}
+input::placeholder { color: var(--txt-3); }
+select { appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%236F7E8D' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 12px center; background-size: 18px;
+  padding-right: 38px; }
+textarea { min-height: 320px; resize: vertical; font-family: ui-monospace, monospace;
+           font-size: 12.5px; line-height: 1.55; }
+.row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+
+.slider { display: flex; align-items: center; gap: 12px; }
+.slider input[type=range] { flex: 1; appearance: none; height: 30px; background: none; }
+.slider input[type=range]::-webkit-slider-runnable-track {
+  height: 5px; border-radius: 99px; background: var(--surface-3); }
+.slider input[type=range]::-moz-range-track {
+  height: 5px; border-radius: 99px; background: var(--surface-3); }
+.slider input[type=range]::-webkit-slider-thumb {
+  appearance: none; width: 22px; height: 22px; border-radius: 50%;
+  background: var(--accent); margin-top: -8.5px; border: 3px solid var(--bg-soft);
+  box-shadow: 0 1px 4px rgba(0,0,0,.5); }
+.slider input[type=range]::-moz-range-thumb {
+  width: 16px; height: 16px; border-radius: 50%; background: var(--accent);
+  border: 3px solid var(--bg-soft); }
+.slider .val { font: 600 13px/1 ui-monospace, monospace; color: var(--txt-2);
+               min-width: 40px; text-align: right; }
+
+.segbar {
+  display: flex; gap: 3px; background: var(--surface); padding: 4px;
+  border-radius: var(--r); border: 1px solid var(--line); margin-bottom: 14px;
+}
+.segbar button {
+  flex: 1; appearance: none; border: 0; background: none; cursor: pointer;
+  color: var(--txt-2); font: 600 13.5px/1 inherit; min-height: 38px;
+  border-radius: var(--r-sm); transition: background .15s var(--ease), color .15s var(--ease);
+}
+.segbar button.on { background: var(--surface-3); color: var(--txt); }
+
+.note { color: var(--txt-3); font-size: 12.5px; line-height: 1.55; margin: 10px 2px 0; }
+.note code { background: var(--surface-2); border-radius: 4px; padding: 1px 5px;
+             font-family: ui-monospace, monospace; font-size: 11.5px; }
+.err { color: var(--red); font-size: 13px; white-space: pre-wrap; margin-top: 12px;
+       background: color-mix(in srgb, var(--red) 9%, transparent);
+       border: 1px solid color-mix(in srgb, var(--red) 26%, transparent);
+       border-radius: var(--r); padding: 11px 13px; }
+
+/* sticky save bar */
+.savebar {
+  position: fixed; left: 0; right: 0; z-index: 45;
+  bottom: calc(var(--nav-h) + env(safe-area-inset-bottom));
+  padding: 10px 16px; display: none; gap: 8px;
+  background: color-mix(in srgb, var(--bg-soft) 95%, transparent);
+  backdrop-filter: blur(14px); border-top: 1px solid var(--line);
+}
+.savebar.on { display: flex; }
+.savebar .btn { flex: 1; }
+.savebar .btn.primary { flex: 2; }
+
+/* toast */
+#toast {
+  position: fixed; z-index: 70; left: 50%; transform: translate(-50%, 20px);
+  bottom: calc(var(--nav-h) + env(safe-area-inset-bottom) + 18px);
+  background: var(--surface-3); border: 1px solid var(--line); color: var(--txt);
+  border-radius: 999px; padding: 11px 20px; font-size: 13.5px; font-weight: 550;
+  box-shadow: var(--shadow); opacity: 0; pointer-events: none;
+  transition: opacity .22s var(--ease), transform .22s var(--ease);
+  max-width: 90vw; text-align: center;
+}
+#toast.on { opacity: 1; transform: translate(-50%, 0); }
+#toast.bad { border-color: var(--red); color: #FCA5A5; }
+
+/* ═══ desktop ═════════════════════════════════════════════════════════════ */
+@media (min-width: 760px) {
+  body { padding-bottom: 40px; }
+  .nav {
+    position: sticky; top: 0; bottom: auto; z-index: 39;
+    max-width: 860px; margin: 18px auto -4px; border: 1px solid var(--line);
+    border-radius: var(--r); grid-template-columns: repeat(3, minmax(0,1fr));
+    padding: 4px; background: var(--surface); backdrop-filter: none;
   }
-  * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--txt);
-         font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
-  header { display: flex; align-items: baseline; gap: 12px; padding: 14px 20px;
-           background: var(--panel); border-bottom: 1px solid var(--line); }
-  header h1 { font-size: 18px; margin: 0; letter-spacing: .04em; }
-  header .ip { color: var(--dim); font-family: ui-monospace, monospace; }
-  main { max-width: 1100px; margin: 0 auto; padding: 18px 20px 60px; }
-  h2 { font-size: 14px; text-transform: uppercase; letter-spacing: .1em;
-       color: var(--dim); margin: 26px 0 10px; }
-  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px,1fr)); gap: 10px; }
-  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
-          padding: 12px 14px; }
-  .card .k { color: var(--dim); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; }
-  .card .v { font-size: 20px; margin-top: 4px; font-family: ui-monospace, monospace; }
-  .ok  { color: var(--green); } .warn { color: var(--amber); } .bad { color: var(--red); }
-  button { background: var(--panel2); color: var(--txt); border: 1px solid var(--line);
-           border-radius: 8px; padding: 7px 14px; cursor: pointer; font: inherit; }
-  button:hover { border-color: var(--acc); }
-  button.primary { background: var(--acc); color: #08211f; border-color: var(--acc); font-weight: 600; }
-  button.danger:hover { border-color: var(--red); color: var(--red); }
-  button.small { padding: 3px 9px; font-size: 13px; }
-  .laylist { display: flex; flex-direction: column; gap: 8px; }
-  .lay { display: flex; align-items: center; gap: 12px; background: var(--panel);
-         border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; }
-  .lay.active { border-color: var(--acc); box-shadow: 0 0 0 1px var(--acc); }
-  .lay .nm { font-weight: 600; min-width: 110px; }
-  .lay .meta { color: var(--dim); font-size: 13px; flex: 1; }
-  .lay .badge { font-size: 11px; background: var(--acc); color: #08211f;
-                border-radius: 20px; padding: 2px 10px; font-weight: 700; }
-  #editor { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
-            padding: 16px; margin-top: 14px; display: none; }
-  #editor.open { display: block; }
-  .row { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; align-items: center; }
-  label { color: var(--dim); font-size: 13px; }
-  input, select, textarea { background: var(--panel2); color: var(--txt);
-        border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; font: inherit; }
-  input:focus, select:focus, textarea:focus { outline: 1px solid var(--acc); }
-  input.sm { width: 70px; } input.md { width: 130px; } input.lg { width: 200px; }
-  /* evdev button names run long (BTN_TRIGGER_HAPPY15) — don't clip them */
-  input.b-code { width: 240px; }
-  table { border-collapse: collapse; width: 100%; margin-bottom: 8px; }
-  th { text-align: left; color: var(--dim); font-size: 12px; font-weight: 500;
-       padding: 4px 6px; border-bottom: 1px solid var(--line); }
-  td { padding: 4px 6px; }
-  .tabs { display: flex; gap: 6px; margin: 8px 0; }
-  .tabs button.on { background: var(--acc); color: #08211f; font-weight: 600; }
-  textarea#rawjson { width: 100%; min-height: 320px; font-family: ui-monospace, monospace;
-                     font-size: 13px; display: none; }
-  #problems { color: var(--red); white-space: pre-wrap; font-size: 13px; margin: 8px 0; }
-  #savemsg { color: var(--green); font-size: 13px; }
-  .hint { color: var(--dim); font-size: 13px; margin: 6px 0 12px; }
-  code { background: var(--panel2); border-radius: 4px; padding: 1px 5px;
-         font-size: 13px; }
+  .nav button { flex-direction: row; height: 42px; gap: 8px; font-size: 13.5px;
+                border-radius: var(--r-sm); }
+  .nav button.on { background: var(--surface-3); color: var(--txt); }
+  .nav button.on svg { color: var(--accent); }
+  .nav button svg { width: 18px; height: 18px; }
+  .nav .badge { transform: translate(30px, -9px); }
+  .grid2 { grid-template-columns: repeat(4, 1fr); }
+  .scrim { align-items: center; }
+  .sheet { border-radius: var(--r-xl); max-height: 86vh; animation: pop .24s var(--ease); }
+  .savebar { position: sticky; bottom: 16px; border-radius: var(--r);
+             border: 1px solid var(--line); max-width: 860px; margin: 16px auto 0; }
+  #toast { bottom: 26px; }
+  .lay { display: flex; align-items: center; gap: 14px; }
+  .lay .body { flex: 1; min-width: 0; }
+  .lay .acts { margin-top: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+}
 </style>
 </head>
 <body>
-<header>
-  <h1>HOTAS BRIDGE</h1>
-  <span class="ip" id="hip">—</span>
-  <span class="ip" id="hdev" style="margin-left:auto"></span>
+
+<header class="topbar">
+  <div class="brand"><span class="mark">H</span> HOTAS Bridge</div>
+  <span class="linkpill"><span class="dot" id="tb-dot"></span><span id="tb-ip">connecting…</span></span>
 </header>
+
+<nav class="nav" id="nav">
+  <button data-v="status" class="on">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3 8 4-16 3 8h4"/></svg>
+    Status</button>
+  <button data-v="layouts">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+    Layouts</button>
+  <button data-v="editor">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+    Editor</button>
+</nav>
+
 <main>
-  <h2>Status</h2>
-  <div class="cards">
-    <div class="card"><div class="k">Xbox</div><div class="v" id="st-xbox">—</div></div>
-    <div class="card"><div class="k">Poll ping</div><div class="v" id="st-ping">—</div></div>
-    <div class="card"><div class="k">Menu mode</div>
-      <div class="v" id="st-menu">—</div>
-      <div style="margin-top:8px"><button class="small" id="menubtn">toggle</button></div></div>
-    <div class="card"><div class="k">Active layout</div><div class="v" id="st-layout">—</div></div>
-    <div class="card"><div class="k">Uptime</div><div class="v" id="st-up">—</div></div>
-  </div>
-
-  <h2>Game layouts</h2>
-  <div class="hint">Press the layout-switch button on the throttle (default
-    <code>BTN_BASE4</code>, the lower half of the first T-rocker) to cycle these
-    in order — or activate one here. The active game shows on the throttle
-    screen as its short name.</div>
-  <div class="laylist" id="laylist"></div>
-  <div class="row" style="margin-top:10px">
-    <button id="newbtn">+ New layout</button>
-  </div>
-
-  <div id="editor">
-    <div class="row" style="justify-content:space-between">
-      <strong id="ed-title">edit</strong>
-      <div class="row" style="margin:0">
-        <button class="small" id="rawtoggle">raw JSON</button>
-        <button class="small" id="ed-close">close</button>
-      </div>
+  <!-- ─── STATUS ─────────────────────────────────────────────────────── -->
+  <section class="view on" id="v-status">
+    <div class="hero">
+      <div class="lbl">Now playing</div>
+      <div class="game" id="s-game">—</div>
+      <div class="sub" id="s-gamesub">—</div>
+      <div class="mfd mono" id="s-mfd">MENU:—</div>
     </div>
-    <div id="formview">
-      <div class="row">
-        <label>display name <input class="lg" id="f-display"></label>
-        <label>MFD name (≤8) <input class="sm" id="f-short" maxlength="8"></label>
-        <label>inherits <select id="f-inherits"></select></label>
-        <label>cycle order <input class="sm" id="f-order" type="number"></label>
-      </div>
-      <div class="hint">Only what you set here overrides the inherited layout.
-        Leave a field/row out to inherit it. Values shown greyed in the
-        resolved preview come from the parent.</div>
 
-      <h2>Axes</h2>
-      <table id="axtable">
-        <thead><tr><th>evdev axis</th><th>target</th><th>invert</th><th>deadzone</th>
-          <th>expo</th><th>button low</th><th>button high</th><th>threshold</th><th></th></tr></thead>
-        <tbody></tbody>
-      </table>
-      <button class="small" id="addax">+ axis</button>
-      <div class="hint">target <code>split_lt_rt</code> = forward half of the
-        axis → RT, back half → LT (AC7-style throttle). <code>button low/high</code>
-        press an Xbox button when the axis passes ±threshold (e.g. twist → LB/RB).</div>
-
-      <h2>Buttons</h2>
-      <div class="tabs" id="modetabs">
-        <button data-m="mode1" class="on">mode 1</button>
-        <button data-m="mode2">mode 2</button>
-        <button data-m="mode3">mode 3</button>
+    <h2 class="sec">Menu mode</h2>
+    <div class="card trow">
+      <div class="txt">
+        <div class="t1" id="s-menutitle">—</div>
+        <div class="t2" id="s-menusub">Freezes the throttle so it can't scroll menus.</div>
       </div>
-      <table id="btable">
-        <thead><tr><th>evdev button</th><th>target(s), comma for several</th><th></th></tr></thead>
-        <tbody></tbody>
-      </table>
-      <button class="small" id="addbtn">+ button</button>
-      <div class="hint">Targets: <span id="targethint"></span>.
-        Several at once: <code>ls, rs</code> (e.g. AC7 flares).</div>
-
-      <h2>Special buttons</h2>
-      <div class="row">
-        <label>menu / throttle-freeze <input class="md" id="f-suspend" list="btncodes"></label>
-        <label>layout switch <input class="md" id="f-switch" list="btncodes"></label>
-        <label><input type="checkbox" id="f-hat"> POV hat → d-pad</label>
-      </div>
+      <button class="switch amber" id="s-menu" role="switch" aria-checked="false" aria-label="Menu mode"></button>
     </div>
-    <textarea id="rawjson" spellcheck="false"></textarea>
-    <div id="problems"></div>
-    <div class="row" style="margin-top:12px">
-      <button class="primary" id="savebtn">Save</button>
-      <span id="savemsg"></span>
+
+    <h2 class="sec">Bridge</h2>
+    <div class="grid2">
+      <div class="stat"><div class="k">Xbox</div><div class="v" id="s-xbox">—</div></div>
+      <div class="stat"><div class="k">Poll ping</div><div class="v" id="s-ping">—</div></div>
+      <div class="stat"><div class="k">Uptime</div><div class="v" id="s-up">—</div></div>
+      <div class="stat"><div class="k">Board IP</div><div class="v mono" id="s-ip" style="font-size:15px">—</div></div>
     </div>
-    <details style="margin-top:10px"><summary class="hint">resolved layout (with inheritance applied)</summary>
-      <pre id="resolved" style="font-size:12px;color:var(--dim);overflow:auto"></pre></details>
-  </div>
-  <datalist id="axcodes"></datalist>
-  <datalist id="btncodes"></datalist>
+    <p class="note" id="s-dev"></p>
+  </section>
+
+  <!-- ─── LAYOUTS ────────────────────────────────────────────────────── -->
+  <section class="view" id="v-layouts">
+    <p class="note" style="margin:0 2px 14px">
+      Press the layout button on the throttle to cycle these in order, or pick one here.
+      The active game shows on the throttle screen.
+    </p>
+    <div class="stack" id="l-list"></div>
+    <div style="margin-top:12px">
+      <button class="btn dashed block" id="l-new">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+        New layout</button>
+    </div>
+  </section>
+
+  <!-- ─── EDITOR ─────────────────────────────────────────────────────── -->
+  <section class="view" id="v-editor">
+    <div id="e-empty" class="empty">
+      <b>No layout open</b>
+      Pick one from Layouts and tap Edit.
+    </div>
+
+    <div id="e-body" style="display:none">
+      <div class="card" style="margin-bottom:14px">
+        <div class="trow">
+          <div class="txt">
+            <div class="t1" id="e-name">—</div>
+            <div class="t2 mono" id="e-file">—</div>
+          </div>
+          <span class="tag inh" id="e-inh"></span>
+        </div>
+      </div>
+
+      <div class="segbar" id="e-tabs">
+        <button data-t="buttons" class="on">Buttons</button>
+        <button data-t="axes">Axes</button>
+        <button data-t="setup">Setup</button>
+      </div>
+
+      <!-- buttons -->
+      <div id="e-buttons">
+        <div class="segbar" id="e-modes">
+          <button data-m="mode1" class="on">Mode 1</button>
+          <button data-m="mode2">Mode 2</button>
+          <button data-m="mode3">Mode 3</button>
+        </div>
+        <div class="stack" id="e-blist"></div>
+        <div style="margin-top:12px">
+          <button class="btn dashed block" id="e-addbtn">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+            Add a button — press it on the stick</button>
+        </div>
+        <p class="note">Dashed rows are inherited from the parent layout. Tap any row to change it.</p>
+      </div>
+
+      <!-- axes -->
+      <div id="e-axes" style="display:none">
+        <div class="stack" id="e-alist"></div>
+        <div style="margin-top:12px">
+          <button class="btn dashed block" id="e-addax">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+            Add an axis — move it on the stick</button>
+        </div>
+      </div>
+
+      <!-- setup -->
+      <div id="e-setup" style="display:none">
+        <div class="field"><label>Display name</label>
+          <input type="text" id="f-display" placeholder="Ace Combat 7"></div>
+        <div class="row2">
+          <div class="field"><label>Throttle screen name (≤8)</label>
+            <input type="text" id="f-short" maxlength="8" placeholder="AC7"></div>
+          <div class="field"><label>Cycle order</label>
+            <input type="number" id="f-order" placeholder="50"></div>
+        </div>
+        <div class="field"><label>Inherits from</label>
+          <select id="f-inherits"></select></div>
+
+        <h2 class="sec">Special buttons</h2>
+        <div class="stack" id="f-special"></div>
+
+        <h2 class="sec">Options</h2>
+        <div class="card trow">
+          <div class="txt"><div class="t1">POV hat drives the D-pad</div>
+            <div class="t2">Turn off to free the hat for something else.</div></div>
+          <button class="switch" id="f-hat" role="switch" aria-checked="true" aria-label="Hat to dpad"></button>
+        </div>
+
+        <h2 class="sec">Advanced</h2>
+        <div class="btnrow">
+          <button class="btn sm ghost" id="e-raw">Edit raw JSON</button>
+          <button class="btn sm ghost" id="e-preview">Resolved preview</button>
+        </div>
+      </div>
+
+      <div class="err" id="e-err" style="display:none"></div>
+    </div>
+  </section>
 </main>
+
+<div class="savebar" id="savebar">
+  <button class="btn ghost" id="sb-revert">Discard</button>
+  <button class="btn primary" id="sb-save">Save changes</button>
+</div>
+
+<div class="scrim" id="scrim"><div class="sheet" id="sheet"></div></div>
+<div id="toast"></div>
 
 <script>
 "use strict";
-const $ = id => document.getElementById(id);
-let codes = {axes: [], buttons: [], targets: [], button_targets: []};
-let layouts = [];
-let editName = null;      // layout being edited
-let raw = null;           // its raw JSON (the file)
-let resolved = {};        // the same layout with inheritance applied
-let inherited = {};       // what it would be if its own file said nothing
-let origRaw = {};         // the file as loaded, to keep saves faithful
-let curMode = "mode1";
-let rawMode = false;
+const $  = s => document.querySelector(s);
+const $$ = s => [...document.querySelectorAll(s)];
+const esc = s => String(s ?? "").replace(/[&<>"']/g,
+  c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 
-const api = async (path, opts) => {
-  const r = await fetch(path, opts);
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(j.problems ? j.problems.join("\n") : (j.error || r.status));
-  return j;
+/* ═══ hardware vocabulary ═══════════════════════════════════════════════
+   Friendly names for the X52's evdev codes. Standard joystick ordering is
+   trigger, thumb, thumb2, top, top2, pinkie, base…base6 — which on the X52
+   is trigger, FIRE, A, B, C, pinkie, D, E, T1, T2, T3, T4.            */
+const HW = {
+  BTN_TRIGGER: "Main trigger",      BTN_THUMB:  "FIRE — thumb",
+  BTN_THUMB2:  "A — stick head",    BTN_TOP:    "B — stick head",
+  BTN_TOP2:    "C — stick head",    BTN_PINKIE: "Pinkie trigger",
+  BTN_BASE:    "D — throttle",      BTN_BASE2:  "E — throttle",
+  BTN_BASE3:   "T1 toggle",         BTN_BASE4:  "T2 toggle",
+  BTN_BASE5:   "T3 toggle",         BTN_BASE6:  "T4 toggle",
+  BTN_TRIGGER_HAPPY12: "Mode dial — M1",
+  BTN_TRIGGER_HAPPY13: "Mode dial — M2",
+  BTN_TRIGGER_HAPPY14: "Mode dial — M3",
+  BTN_TRIGGER_HAPPY15: "i — throttle",
+  ABS_X:  "Stick — left / right",   ABS_Y:  "Stick — forward / back",
+  ABS_RZ: "Stick — twist",          ABS_Z:  "Throttle lever",
+  ABS_RY: "Rotary — upper",         ABS_RX: "Rotary — lower",
+  ABS_HAT0X: "POV hat — X",         ABS_HAT0Y: "POV hat — Y",
+};
+const hw = c => HW[c] || c;
+
+/* Xbox targets: label, css class, group. */
+const XB = {
+  a:{l:"A",c:"face f-a"}, b:{l:"B",c:"face f-b"}, x:{l:"X",c:"face f-x"}, y:{l:"Y",c:"face f-y"},
+  lb:{l:"LB",c:"bump"}, rb:{l:"RB",c:"bump"},
+  lt_button:{l:"LT",c:"trig"}, rt_button:{l:"RT",c:"trig"},
+  ls:{l:"LS",c:""}, rs:{l:"RS",c:""},
+  menu:{l:"MENU",c:""}, view:{l:"VIEW",c:""},
+  dpad_up:{l:"▲",c:""}, dpad_down:{l:"▼",c:""},
+  dpad_left:{l:"◀",c:""}, dpad_right:{l:"▶",c:""},
+  select_mode1:{l:"M1",c:""}, select_mode2:{l:"M2",c:""}, select_mode3:{l:"M3",c:""},
+  lx:{l:"LX",c:""}, ly:{l:"LY",c:""}, rx:{l:"RX",c:""}, ry:{l:"RY",c:""},
+  lt:{l:"LT",c:"trig"}, rt:{l:"RT",c:"trig"}, split_lt_rt:{l:"LT+RT",c:"trig"},
+};
+const BTN_GROUPS = [
+  ["Face buttons",  ["a","b","x","y"]],
+  ["Bumpers",       ["lb","rb"]],
+  ["Triggers (tap)",["lt_button","rt_button"]],
+  ["Stick clicks",  ["ls","rs"]],
+  ["D-pad",         ["dpad_up","dpad_down","dpad_left","dpad_right"]],
+  ["System",        ["menu","view"]],
+  ["Mode dial",     ["select_mode1","select_mode2","select_mode3"]],
+];
+const BTN_DESC = {
+  a:"A", b:"B", x:"X", y:"Y", lb:"Left bumper", rb:"Right bumper",
+  lt_button:"Left trigger, full", rt_button:"Right trigger, full",
+  ls:"Left stick click", rs:"Right stick click", menu:"Menu", view:"View",
+  dpad_up:"Up", dpad_down:"Down", dpad_left:"Left", dpad_right:"Right",
+  select_mode1:"Switch to mode 1", select_mode2:"Switch to mode 2",
+  select_mode3:"Switch to mode 3",
+};
+const AXIS_GROUPS = [
+  ["Left stick",  ["lx","ly"]],
+  ["Right stick", ["rx","ry"]],
+  ["Triggers",    ["lt","rt","split_lt_rt"]],
+];
+const AXIS_DESC = {
+  lx:"Left / right", ly:"Up / down", rx:"Left / right", ry:"Up / down",
+  lt:"Left trigger", rt:"Right trigger",
+  split_lt_rt:"Split — forward half RT, back half LT",
+};
+const xbGlyph = (t, big) =>
+  `<span class="xb ${XB[t]?.c || ""}${big ? " big" : ""}">${esc(XB[t]?.l || t)}</span>`;
+const glyphs = (t, big) => {
+  const a = t == null ? [] : (Array.isArray(t) ? t : [t]);
+  if (!a.length) return `<span class="xb none${big ? " big" : ""}">none</span>`;
+  return a.map(x => xbGlyph(x, big)).join("");
 };
 
-// ── status polling ──────────────────────────────────────────────────────────
-async function poll() {
-  try {
-    const s = await api("/api/status");
-    $("hip").textContent = s.ip || "—";
-    $("hdev").textContent = s.device || "";
-    const x = $("st-xbox");
-    x.textContent = s.connected ? "CONNECTED" : "waiting";
-    x.className = "v " + (s.connected ? "ok" : "warn");
-    $("st-ping").textContent = s.ping_ms != null ? s.ping_ms + " ms" : "—";
-    const m = $("st-menu");
-    m.textContent = s.menu ? "ON (frozen)" : "OFF (flying)";
-    m.className = "v " + (s.menu ? "warn" : "ok");
-    m.dataset.on = s.menu ? "1" : "";
-    $("st-layout").textContent = s.layout_short || (s.legacy ? "legacy" : "—");
-    $("st-up").textContent = fmtUp(s.uptime_s);
-    layouts = s.layouts || [];
-    renderList();
-  } catch (e) { $("st-xbox").textContent = "bridge down?"; $("st-xbox").className = "v bad"; }
+/* ═══ api ═══════════════════════════════════════════════════════════════ */
+const api = async (p, o) => {
+  const r = await fetch(p, o);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.problems ? j.problems.join("\n") : (j.error || `HTTP ${r.status}`));
+  return j;
+};
+let toastT;
+function toast(msg, bad) {
+  const t = $("#toast");
+  t.textContent = msg; t.classList.toggle("bad", !!bad); t.classList.add("on");
+  clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove("on"), 2600);
 }
-const fmtUp = s => s >= 3600 ? `${(s/3600)|0}h ${((s%3600)/60)|0}m` : s >= 60 ? `${(s/60)|0}m ${s%60}s` : s + "s";
-$("menubtn").onclick = async () => {
-  await api("/api/menu", {method: "POST", body: JSON.stringify({on: !$("st-menu").dataset.on})});
+
+/* ═══ state ═════════════════════════════════════════════════════════════ */
+let layouts = [], status = {};
+let editName = null, raw = null, inherited = {}, origRaw = {};
+let curMode = "mode1", curTab = "buttons", dirty = false;
+
+/* ═══ navigation ════════════════════════════════════════════════════════ */
+function showSaveBar(on) {
+  $("#savebar").classList.toggle("on", !!on);
+  document.body.classList.toggle("saving", !!on);
+}
+function go(v) {
+  $$("#nav button").forEach(b => b.classList.toggle("on", b.dataset.v === v));
+  $$(".view").forEach(s => s.classList.toggle("on", s.id === "v-" + v));
+  window.scrollTo({ top: 0, behavior: "instant" });
+  showSaveBar(v === "editor" && dirty);
+}
+$("#nav").onclick = e => { const b = e.target.closest("button"); if (b) go(b.dataset.v); };
+
+function setDirty(v) {
+  dirty = v;
+  showSaveBar(v && $("#v-editor").classList.contains("on"));
+}
+
+/* ═══ status ════════════════════════════════════════════════════════════ */
+async function poll() {
+  let s;
+  try { s = await api("/api/status"); }
+  catch { $("#tb-ip").textContent = "bridge offline"; $("#tb-dot").className = "dot"; return; }
+  status = s; layouts = s.layouts || [];
+
+  $("#tb-ip").textContent = s.ip || "—";
+  $("#tb-dot").className = "dot " + (s.connected ? "on" : "off");
+
+  const act = layouts.find(l => l.active);
+  $("#s-game").textContent = act ? act.display_name : (s.legacy ? "Fixed config" : "—");
+  $("#s-gamesub").textContent = act
+    ? `${act.name}.json` + (act.inherits ? ` · inherits ${act.inherits}` : "")
+    : (s.legacy ? "running with --config, layout switching off" : "no layout");
+  $("#s-mfd").textContent =
+    `MENU:${s.menu ? "ON" : "OFF"}`.padEnd(8) + (act ? act.short_name : "").padStart(8);
+
+  $("#s-menutitle").textContent = s.menu ? "On — throttle frozen" : "Off — flying";
+  $("#s-menusub").textContent = s.menu
+    ? "Safe for menus. Turn off to fly."
+    : "Throttle live. Turn on before opening a menu.";
+  $("#s-menu").setAttribute("aria-checked", s.menu ? "true" : "false");
+
+  const x = $("#s-xbox");
+  x.textContent = s.connected ? "Connected" : "Waiting";
+  x.className = "v " + (s.connected ? "ok" : "warn");
+  $("#s-ping").innerHTML = s.ping_ms != null ? `${Math.round(s.ping_ms)} <small>ms</small>` : "—";
+  $("#s-up").textContent = fmtUp(s.uptime_s);
+  $("#s-ip").textContent = s.ip || "—";
+  $("#s-dev").textContent = s.device ? `Reading ${s.device}` : "";
+
+  renderLayouts();
+}
+const fmtUp = s => s == null ? "—"
+  : s >= 3600 ? `${Math.floor(s/3600)}h ${Math.floor(s%3600/60)}m`
+  : s >= 60 ? `${Math.floor(s/60)}m` : `${s}s`;
+
+$("#s-menu").onclick = async () => {
+  const on = $("#s-menu").getAttribute("aria-checked") !== "true";
+  $("#s-menu").setAttribute("aria-checked", on ? "true" : "false");   // optimistic
+  try { await api("/api/menu", { method: "POST", body: JSON.stringify({ on }) }); }
+  catch (e) { toast(e.message, true); }
   poll();
 };
 
-// ── layout list ─────────────────────────────────────────────────────────────
-function renderList() {
-  const el = $("laylist");
+/* ═══ layouts ═══════════════════════════════════════════════════════════ */
+function renderLayouts() {
+  const el = $("#l-list");
   el.innerHTML = "";
   for (const l of layouts) {
     const d = document.createElement("div");
     d.className = "lay" + (l.active ? " active" : "");
-    d.innerHTML = `<span class="nm">${esc(l.display_name)}</span>
-      <span class="meta">${esc(l.name)}.json${l.inherits ? " · inherits " + esc(l.inherits) : ""} · MFD: ${esc(l.short_name)}</span>
-      ${l.active ? '<span class="badge">ACTIVE</span>' : '<button class="small act">Activate</button>'}
-      <button class="small ed">Edit</button>
-      <button class="small dup" title="Copy this layout to a new one">Duplicate</button>
-      ${l.name !== "default" && !l.active ? '<button class="small danger del">Delete</button>' : ""}`;
+    d.innerHTML = `
+      <div class="body">
+        <div class="top">
+          <span class="nm">${esc(l.display_name)}</span>
+          ${l.active ? '<span class="tag live">Active</span>' : ""}
+        </div>
+        <div class="meta">${esc(l.name)}.json${l.inherits ? " · inherits " + esc(l.inherits) : ""} · screen: ${esc(l.short_name)}</div>
+      </div>
+      <div class="acts">
+        ${l.active ? "" : '<button class="btn sm primary a-act">Activate</button>'}
+        <button class="btn sm a-ed">Edit</button>
+        <button class="btn sm ghost a-dup">Duplicate</button>
+        ${l.name !== "default" && !l.active ? '<button class="btn sm ghost danger a-del">Delete</button>' : ""}
+      </div>`;
     const q = c => d.querySelector(c);
-    if (q(".act")) q(".act").onclick = () => api("/api/activate",
-      {method: "POST", body: JSON.stringify({name: l.name})}).then(poll).catch(alert);
-    q(".ed").onclick = () => openEditor(l.name);
-    q(".dup").onclick = () => duplicate(l.name);
-    if (q(".del")) q(".del").onclick = () => {
-      if (confirm(`Delete layout '${l.name}'?`))
-        api(`/api/layouts/${l.name}`, {method: "DELETE"}).then(poll).catch(e => alert(e.message));
+    q(".a-ed").onclick = () => openEditor(l.name);
+    q(".a-dup").onclick = () => duplicate(l.name);
+    if (q(".a-act")) q(".a-act").onclick = async () => {
+      try { await api("/api/activate", { method: "POST", body: JSON.stringify({ name: l.name }) });
+            toast(`Switched to ${l.display_name}`); poll(); }
+      catch (e) { toast(e.message, true); }
     };
+    if (q(".a-del")) q(".a-del").onclick = () => confirmSheet(
+      `Delete ${l.display_name}?`, `${l.name}.json will be removed for good.`, "Delete",
+      async () => {
+        try { await api(`/api/layouts/${l.name}`, { method: "DELETE" });
+              toast("Layout deleted"); poll(); }
+        catch (e) { toast(e.message, true); }
+      });
     el.appendChild(d);
   }
 }
-const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 
-$("newbtn").onclick = async () => {
-  const name = prompt("New layout name (a-z, 0-9, _ , -):", "mygame");
-  if (!name) return;
-  if (!/^[a-z0-9][a-z0-9_\-]{0,31}$/.test(name)) return alert("bad name");
+$("#l-new").onclick = () => nameSheet("New layout", "mygame", async name => {
+  raw = { display_name: name, short_name: name.toUpperCase().slice(0, 8),
+          inherits: "default", order: 50, axes: {}, buttons: {} };
   editName = name;
-  raw = {display_name: name, short_name: name.toUpperCase().slice(0, 8),
-         inherits: "default", order: 50, axes: {}, buttons: {}};
   origRaw = JSON.parse(JSON.stringify(raw));
-  try { inherited = (await api("/api/layouts/default")).resolved; }
-  catch (e) { inherited = {}; }
-  resolved = inherited;
-  showEditor();
-};
+  try { inherited = (await api("/api/layouts/default")).resolved; } catch { inherited = {}; }
+  showEditor(); setDirty(true);
+  toast("Unsaved — add your bindings, then Save");
+});
+
 async function duplicate(src) {
-  const name = prompt(`Copy '${src}' as:`, src + "-copy");
-  if (!name) return;
-  try {
-    const j = await api(`/api/layouts/${src}`);
-    editName = name;
-    raw = j.raw;
-    resolved = j.resolved || {};
-    inherited = j.inherited || {};
-    raw.display_name = (raw.display_name || src) + " copy";
-    origRaw = JSON.parse(JSON.stringify(raw));
-    showEditor();
-  } catch (e) { alert(e.message); }
+  const l = layouts.find(x => x.name === src);
+  nameSheet(`Duplicate ${l ? l.display_name : src}`, src + "-copy", async name => {
+    try {
+      const j = await api(`/api/layouts/${src}`);
+      editName = name; raw = j.raw; inherited = j.inherited || {};
+      raw.display_name = (raw.display_name || src) + " copy";
+      origRaw = JSON.parse(JSON.stringify(raw));
+      showEditor(); setDirty(true);
+      toast("Copy ready — Save to keep it");
+    } catch (e) { toast(e.message, true); }
+  });
 }
 
-// ── editor ──────────────────────────────────────────────────────────────────
+/* ═══ editor ════════════════════════════════════════════════════════════ */
 async function openEditor(name) {
   try {
     const j = await api(`/api/layouts/${name}`);
-    editName = name;
-    raw = j.raw;
-    resolved = j.resolved || {};
-    inherited = j.inherited || {};
+    editName = name; raw = j.raw; inherited = j.inherited || {};
     origRaw = JSON.parse(JSON.stringify(j.raw));
-    $("resolved").textContent = JSON.stringify(j.resolved, null, 2);
+    setDirty(false);
     showEditor();
-  } catch (e) { alert(e.message); }
+  } catch (e) { toast(e.message, true); }
 }
 function showEditor() {
-  $("editor").classList.add("open");
-  $("ed-title").textContent = `Editing  ${editName}.json`;
-  $("problems").textContent = ""; $("savemsg").textContent = "";
-  rawMode = false; syncRawVisibility();
-  fillForm();
-  $("editor").scrollIntoView({behavior: "smooth"});
-}
-$("ed-close").onclick = () => $("editor").classList.remove("open");
-
-function fillForm() {
-  $("f-display").value = raw.display_name || "";
-  $("f-short").value = raw.short_name || "";
-  $("f-order").value = raw.order ?? "";
-  $("f-suspend").value = raw.suspend_button || "";
-  $("f-switch").value = raw.layout_switch_button || "";
-  // Blank means "inherit" — show what that resolves to so it isn't a mystery.
-  $("f-suspend").placeholder = inherited.suspend_button || "(none)";
-  $("f-switch").placeholder = inherited.layout_switch_button || "(none)";
-  $("f-hat").checked = (raw.hat_to_dpad ?? inherited.hat_to_dpad) !== false;
-  const inh = $("f-inherits");
-  inh.innerHTML = '<option value="">(none — standalone)</option>';
-  for (const l of layouts) if (l.name !== editName)
-    inh.innerHTML += `<option${l.name === raw.inherits ? " selected" : ""}>${esc(l.name)}</option>`;
-  renderAxes(); renderButtons();
+  $("#e-empty").style.display = "none";
+  $("#e-body").style.display = "";
+  $("#e-err").style.display = "none";
+  $("#e-name").textContent = raw.display_name || editName;
+  $("#e-file").textContent = editName + ".json";
+  $("#e-inh").textContent = raw.inherits ? "inherits " + raw.inherits : "standalone";
+  fillSetup(); renderBindings(); renderAxes();
+  go("editor");
 }
 
-function renderAxes() {
-  const tb = $("axtable").querySelector("tbody");
-  tb.innerHTML = "";
-  for (const [axis, acfg] of Object.entries(raw.axes || {})) addAxRow(axis, acfg || {});
-}
-function addAxRow(axis, acfg) {
-  const tb = $("axtable").querySelector("tbody");
-  const tr = document.createElement("tr");
-  // What this axis would be if the row said nothing — i.e. the parent's value.
-  const inh = ((inherited.axes || {})[axis]) || {};
-  const has = k => Object.prototype.hasOwnProperty.call(acfg, k);
-  // target: "" = inherit, "__null__" = explicitly drop the inherited one.
-  const sel = has("target") ? (acfg.target === null ? "__null__" : acfg.target) : "";
-  const opt = (v, label) => `<option value="${v}"${sel === v ? " selected" : ""}>${label}</option>`;
-  const ph = k => inh[k] != null ? ` placeholder="${esc(join(inh[k]))}"` : "";
-  tr.innerHTML = `
-    <td><input class="md ax-code" list="axcodes" value="${esc(axis)}"></td>
-    <td><select class="ax-target">
-      ${opt("", inh.target ? `inherit: ${inh.target}` : "inherit")}
-      ${opt("__null__", "none (drop inherited)")}
-      ${codes.targets.map(t => opt(t, t)).join("")}</select></td>
-    <td><input type="checkbox" class="ax-inv"${(has("invert") ? acfg.invert : inh.invert) ? " checked" : ""}></td>
-    <td><input class="sm ax-dz" type="number" step="0.01" min="0" max="1" value="${acfg.deadzone ?? ""}"${ph("deadzone")}></td>
-    <td><input class="sm ax-expo" type="number" step="0.05" min="0" max="1" value="${acfg.expo ?? ""}"${ph("expo")}></td>
-    <td><input class="md ax-blo" value="${esc(join(acfg.button_low))}"${ph("button_low")}></td>
-    <td><input class="md ax-bhi" value="${esc(join(acfg.button_high))}"${ph("button_high")}></td>
-    <td><input class="sm ax-thr" type="number" step="0.05" min="0.05" max="0.95" value="${acfg.button_threshold ?? ""}"${ph("button_threshold")}></td>
-    <td><button class="small danger">✕</button></td>`;
-  tr.querySelector("button").onclick = () => tr.remove();
-  tb.appendChild(tr);
-}
-$("addax").onclick = () => addAxRow("", {});
-
-function renderButtons() {
-  const tb = $("btable").querySelector("tbody");
-  tb.innerHTML = "";
-  const bmap = (raw.buttons || {})[curMode] || {};
-  const inhMap = (inherited.buttons || {})[curMode] || {};
-  for (const [b, t] of Object.entries(bmap)) addBtnRow(b, t);
-  // Show what this mode inherits but doesn't override, greyed, so you can see
-  // the whole live mapping — and edit an inherited row without hunting for it.
-  for (const [b, t] of Object.entries(inhMap))
-    if (!(b in bmap)) addBtnRow(b, undefined, t);
-}
-function addBtnRow(b, t, inherited) {
-  const tb = $("btable").querySelector("tbody");
-  const tr = document.createElement("tr");
-  const isInh = t === undefined && inherited !== undefined;
-  // Inherited rows show their real value (greyed). Left alone they stay
-  // inherited — the file keeps only what you actually change.
-  const val = isInh ? join(inherited) : join(t);
-  tr.innerHTML = `
-    <td><input class="lg b-code" list="btncodes" value="${esc(b)}"></td>
-    <td><input class="lg b-target" value="${esc(val)}"
-        placeholder="a  |  ls, rs  |  (blank = button does nothing)"
-        ${isInh ? 'data-inh="' + esc(val) + '" style="color:var(--dim)"' : ""}></td>
-    <td><button class="small danger">✕</button></td>`;
-  tr.querySelector("button").onclick = () => tr.remove();
-  // Once you change an inherited row it becomes your own override.
-  const ti = tr.querySelector(".b-target");
-  ti.oninput = () => {
-    if (ti.value !== ti.dataset.inh) { ti.style.color = ""; delete ti.dataset.inh; }
-  };
-  tb.appendChild(tr);
-}
-$("addbtn").onclick = () => addBtnRow("", "");
-const join = t => t == null ? "" : (Array.isArray(t) ? t.join(", ") : t);
-
-$("modetabs").onclick = e => {
-  if (e.target.dataset.m) {
-    harvestButtons();                      // keep edits when switching tabs
-    curMode = e.target.dataset.m;
-    for (const b of $("modetabs").children) b.classList.toggle("on", b === e.target);
-    renderButtons();
-  }
+$("#e-tabs").onclick = e => {
+  const b = e.target.closest("button"); if (!b) return;
+  curTab = b.dataset.t;
+  $$("#e-tabs button").forEach(x => x.classList.toggle("on", x === b));
+  $("#e-buttons").style.display = curTab === "buttons" ? "" : "none";
+  $("#e-axes").style.display    = curTab === "axes"    ? "" : "none";
+  $("#e-setup").style.display   = curTab === "setup"   ? "" : "none";
+};
+$("#e-modes").onclick = e => {
+  const b = e.target.closest("button"); if (!b) return;
+  curMode = b.dataset.m;
+  $$("#e-modes button").forEach(x => x.classList.toggle("on", x === b));
+  renderBindings();
 };
 
-function harvestAxes() {
-  const axes = {};
-  for (const tr of $("axtable").querySelectorAll("tbody tr")) {
-    const code = tr.querySelector(".ax-code").value.trim();
-    if (!code) continue;
-    const a = {};
-    const inh = ((inherited.axes || {})[code]) || {};
-    const had = ((origRaw.axes || {})[code]) || {};
-    const t = tr.querySelector(".ax-target").value;
-    if (t === "__null__") a.target = null;   // deliberately drop the inherited target
-    else if (t) a.target = t;                // "" = say nothing, inherit it
-    // Keep a key the file already had; add one only when it changes something.
-    const inv = tr.querySelector(".ax-inv").checked;
-    if ("invert" in had || inv !== !!inh.invert) a.invert = inv;
-    const num = (cls, key) => {
-      const v = tr.querySelector(cls).value;
-      if (v !== "") a[key] = parseFloat(v);
+/* --- buttons ---------------------------------------------------------- */
+function bindingRows() {
+  const own = (raw.buttons || {})[curMode] || {};
+  const inh = (inherited.buttons || {})[curMode] || {};
+  const rows = [];
+  for (const [code, t] of Object.entries(own))
+    if (t !== null) rows.push({ code, target: t, own: true });
+  for (const [code, t] of Object.entries(inh))
+    if (!(code in own)) rows.push({ code, target: t, own: false });
+  return rows;
+}
+function renderBindings() {
+  const el = $("#e-blist"); el.innerHTML = "";
+  const rows = bindingRows();
+  if (!rows.length) {
+    el.innerHTML = `<div class="empty"><b>Nothing bound yet</b>Add a button below.</div>`;
+    return;
+  }
+  for (const r of rows) {
+    const b = document.createElement("button");
+    b.className = "bind" + (r.own ? "" : " inherited");
+    b.innerHTML = `
+      <span class="src">
+        <span class="n">${esc(hw(r.code))}</span>
+        <span class="c mono">${esc(r.code)}${r.own ? "" : " · inherited"}</span>
+      </span>
+      <span class="arrow">→</span>
+      <span class="tgt">${glyphs(r.target)}</span>`;
+    b.onclick = () => pickButtonTarget(r);
+    el.appendChild(b);
+  }
+}
+
+/* --- axes ------------------------------------------------------------- */
+function axisRows() {
+  const own = raw.axes || {}, inh = inherited.axes || {};
+  const rows = [];
+  for (const [code, cfg] of Object.entries(own))
+    if (cfg !== null) rows.push({ code, cfg, own: true });
+  for (const [code, cfg] of Object.entries(inh))
+    if (!(code in own)) rows.push({ code, cfg, own: false });
+  return rows;
+}
+function effAxis(code) {  // what this axis actually resolves to
+  const own = (raw.axes || {})[code];
+  if (own === null) return null;
+  return Object.assign({}, (inherited.axes || {})[code] || {}, own || {});
+}
+function renderAxes(openCode) {
+  const el = $("#e-alist"); el.innerHTML = "";
+  const rows = axisRows();
+  if (!rows.length) {
+    el.innerHTML = `<div class="empty"><b>No axes mapped</b>Add one below.</div>`;
+    return;
+  }
+  for (const r of rows) {
+    const eff = effAxis(r.code) || {};
+    const asBtn = eff.button_low || eff.button_high;
+    const wrap = document.createElement("div");
+    wrap.className = "card" + (r.own ? "" : "");
+    wrap.style.cssText = "padding:0;overflow:hidden" + (r.own ? "" : ";border-style:dashed");
+    const tgt = asBtn
+      ? `${glyphs(eff.button_low)}<span class="arrow" style="opacity:.5">/</span>${glyphs(eff.button_high)}`
+      : glyphs(eff.target);
+    wrap.innerHTML = `
+      <button class="bind" style="border:0;border-radius:0;background:none;width:100%">
+        <span class="src">
+          <span class="n">${esc(hw(r.code))}</span>
+          <span class="c mono">${esc(r.code)}${r.own ? "" : " · inherited"}${asBtn ? " · as buttons" : ""}</span>
+        </span>
+        <span class="arrow">→</span>
+        <span class="tgt">${tgt}</span>
+      </button>
+      <div class="tune" style="display:none;padding:0 14px 14px;border-top:1px solid var(--line-soft)"></div>`;
+    const head = wrap.querySelector("button");
+    const tune = wrap.querySelector(".tune");
+    head.onclick = () => {
+      const open = tune.style.display !== "none";
+      tune.style.display = open ? "none" : "";
+      if (!open) fillTune(tune, r.code);
     };
-    num(".ax-dz", "deadzone"); num(".ax-expo", "expo"); num(".ax-thr", "button_threshold");
-    const lo = tr.querySelector(".ax-blo").value.trim();
-    const hi = tr.querySelector(".ax-bhi").value.trim();
-    if (lo) a.button_low = split(lo);
-    if (hi) a.button_high = split(hi);
-    axes[code] = a;
+    el.appendChild(wrap);
+    // A just-added axis opens expanded, so Invert and the deadzone are right
+    // there — you'll know within one flight if the direction needs flipping.
+    if (r.code === openCode) {
+      tune.style.display = ""; fillTune(tune, r.code);
+      requestAnimationFrame(() => wrap.scrollIntoView({ behavior: "smooth", block: "center" }));
+    }
   }
-  raw.axes = axes;
 }
-function harvestButtons() {
+function fillTune(box, code) {
+  const eff = effAxis(code) || {};
+  const asBtn = !!(eff.button_low || eff.button_high);
+  box.innerHTML = `
+    <div style="margin:14px 0 4px"><button class="btn sm block t-target">
+      Change target</button></div>
+    ${asBtn ? "" : `
+    <div class="trow" style="margin-top:14px">
+      <div class="txt"><div class="t1">Invert</div>
+        <div class="t2">Flip which way the axis pushes.</div></div>
+      <button class="switch t-inv" role="switch" aria-checked="${eff.invert ? "true" : "false"}"></button>
+    </div>
+    <div class="field" style="margin-top:14px"><label>Deadzone — ignore small movement near centre</label>
+      <div class="slider"><input type="range" class="t-dz" min="0" max="0.5" step="0.01"
+        value="${eff.deadzone ?? 0}"><span class="val"></span></div></div>
+    <div class="field"><label>Expo — softer around centre, full at the ends</label>
+      <div class="slider"><input type="range" class="t-ex" min="0" max="0.9" step="0.05"
+        value="${eff.expo ?? 0}"><span class="val"></span></div></div>`}
+    ${asBtn ? `
+    <div class="field" style="margin-top:14px"><label>Press point — how far before the button fires</label>
+      <div class="slider"><input type="range" class="t-thr" min="0.1" max="0.9" step="0.05"
+        value="${eff.button_threshold ?? 0.5}"><span class="val"></span></div></div>` : ""}
+    <button class="btn sm danger block t-del" style="margin-top:6px">Remove this axis</button>`;
+
+  const patch = (k, v) => {
+    raw.axes = raw.axes || {};
+    raw.axes[code] = Object.assign({}, raw.axes[code] || {});
+    if (v === undefined) delete raw.axes[code][k]; else raw.axes[code][k] = v;
+    setDirty(true);
+  };
+  const slider = (sel, key, fmt) => {
+    const inp = box.querySelector(sel); if (!inp) return;
+    const out = inp.parentElement.querySelector(".val");
+    const show = () => out.textContent = fmt(parseFloat(inp.value));
+    show();
+    inp.oninput = () => { show(); patch(key, parseFloat(inp.value)); };
+  };
+  slider(".t-dz",  "deadzone",         v => v === 0 ? "off" : (v * 100).toFixed(0) + "%");
+  slider(".t-ex",  "expo",             v => v === 0 ? "off" : (v * 100).toFixed(0) + "%");
+  slider(".t-thr", "button_threshold", v => (v * 100).toFixed(0) + "%");
+  const inv = box.querySelector(".t-inv");
+  if (inv) inv.onclick = () => {
+    const on = inv.getAttribute("aria-checked") !== "true";
+    inv.setAttribute("aria-checked", on ? "true" : "false");
+    patch("invert", on);
+  };
+  box.querySelector(".t-target").onclick = () => pickAxisTarget(code);
+  box.querySelector(".t-del").onclick = () => confirmSheet(
+    `Remove ${hw(code)}?`,
+    (inherited.axes || {})[code]
+      ? "It's inherited, so this layout will explicitly turn it off."
+      : "This axis will no longer be mapped.",
+    "Remove", () => {
+      raw.axes = raw.axes || {};
+      if ((inherited.axes || {})[code]) raw.axes[code] = null;
+      else delete raw.axes[code];
+      setDirty(true); renderAxes(); toast("Axis removed");
+    });
+}
+
+/* --- setup ------------------------------------------------------------ */
+function fillSetup() {
+  $("#f-display").value = raw.display_name || "";
+  $("#f-short").value   = raw.short_name || "";
+  $("#f-order").value   = raw.order ?? "";
+  $("#f-short").placeholder = inherited.short_name || "AC7";
+  const sel = $("#f-inherits");
+  sel.innerHTML = '<option value="">Nothing — standalone</option>';
+  for (const l of layouts) if (l.name !== editName)
+    sel.innerHTML += `<option${l.name === raw.inherits ? " selected" : ""}>${esc(l.name)}</option>`;
+  const hat = (raw.hat_to_dpad ?? inherited.hat_to_dpad) !== false;
+  $("#f-hat").setAttribute("aria-checked", hat ? "true" : "false");
+  renderSpecial();
+}
+const SPECIAL = [
+  ["suspend_button",      "Menu / throttle-freeze", "Freezes the throttle so menus behave."],
+  ["layout_switch_button","Switch game layout",     "Cycles through your layouts."],
+];
+function renderSpecial() {
+  const el = $("#f-special"); el.innerHTML = "";
+  for (const [key, title, sub] of SPECIAL) {
+    const own = raw[key], inh = inherited[key], val = own ?? inh;
+    const d = document.createElement("div");
+    d.className = "card trow";
+    d.innerHTML = `
+      <div class="txt">
+        <div class="t1">${title}</div>
+        <div class="t2">${sub}</div>
+        <div class="t2 mono" style="margin-top:5px;color:var(--txt-3)">
+          ${val ? esc(hw(val)) + " · " + esc(val) : "not set"}${own == null && inh ? " · inherited" : ""}</div>
+      </div>
+      <button class="btn sm s-learn">Learn</button>`;
+    d.querySelector(".s-learn").onclick = () => captureSheet("button", {
+      title: title,
+      lead: "Press the button you want to use for this.",
+      onPick: code => { raw[key] = code; setDirty(true); renderSpecial(); closeSheet();
+                        toast(`${title}: ${hw(code)}`); },
+      skipTarget: true,
+    });
+    el.appendChild(d);
+  }
+}
+$("#f-hat").onclick = () => {
+  const on = $("#f-hat").getAttribute("aria-checked") !== "true";
+  $("#f-hat").setAttribute("aria-checked", on ? "true" : "false");
+  setDirty(true);
+};
+for (const id of ["f-display", "f-short", "f-order", "f-inherits"])
+  $("#" + id).oninput = () => setDirty(true);
+
+/* ═══ sheets ════════════════════════════════════════════════════════════ */
+const scrim = $("#scrim"), sheet = $("#sheet");
+let onClose = null;
+function openSheet(html) {
+  sheet.innerHTML = `<div class="grab"></div>` + html;
+  scrim.classList.add("on");
+  document.body.style.overflow = "hidden";
+}
+function closeSheet() {
+  scrim.classList.remove("on");
+  document.body.style.overflow = "";
+  sheet.innerHTML = "";
+  if (onClose) { const f = onClose; onClose = null; f(); }
+}
+scrim.onclick = e => { if (e.target === scrim) closeSheet(); };
+document.addEventListener("keydown", e => { if (e.key === "Escape" && scrim.classList.contains("on")) closeSheet(); });
+
+function confirmSheet(title, body, cta, fn) {
+  openSheet(`
+    <h3>${esc(title)}</h3><p class="lead">${esc(body)}</p>
+    <div class="btnrow" style="margin-top:6px">
+      <button class="btn ghost" style="flex:1" data-x>Cancel</button>
+      <button class="btn danger" style="flex:1" data-ok>${esc(cta)}</button>
+    </div>`);
+  sheet.querySelector("[data-x]").onclick = closeSheet;
+  sheet.querySelector("[data-ok]").onclick = () => { closeSheet(); fn(); };
+}
+function nameSheet(title, def, fn) {
+  openSheet(`
+    <h3>${esc(title)}</h3>
+    <p class="lead">Lowercase letters, numbers, dashes and underscores.</p>
+    <div class="field"><input type="text" id="nm-in" value="${esc(def)}" autocomplete="off"></div>
+    <div class="err" id="nm-err" style="display:none"></div>
+    <div class="btnrow">
+      <button class="btn ghost" style="flex:1" data-x>Cancel</button>
+      <button class="btn primary" style="flex:1" data-ok>Continue</button>
+    </div>`);
+  const inp = sheet.querySelector("#nm-in");
+  setTimeout(() => { inp.focus(); inp.select(); }, 60);
+  const ok = () => {
+    const v = inp.value.trim();
+    if (!/^[a-z0-9][a-z0-9_\-]{0,31}$/.test(v)) {
+      const e = sheet.querySelector("#nm-err");
+      e.style.display = ""; e.textContent = "Use a-z, 0-9, _ or - (start with a letter or digit).";
+      return;
+    }
+    if (layouts.some(l => l.name === v)) {
+      const e = sheet.querySelector("#nm-err");
+      e.style.display = ""; e.textContent = `A layout called '${v}' already exists.`;
+      return;
+    }
+    closeSheet(); fn(v);
+  };
+  sheet.querySelector("[data-x]").onclick = closeSheet;
+  sheet.querySelector("[data-ok]").onclick = ok;
+  inp.onkeydown = e => { if (e.key === "Enter") ok(); };
+}
+
+/* --- listen to the stick ---------------------------------------------- */
+let capTimer = null;
+async function captureSheet(kind, opts) {
+  const isAxis = kind === "axis";
+  openSheet(`
+    <h3>${esc(opts.title || (isAxis ? "Add an axis" : "Add a button"))}</h3>
+    <p class="lead">${esc(opts.lead || (isAxis
+      ? "Move the axis you want to map through its full travel."
+      : "Press the button you want to map."))}</p>
+    <div class="listen">
+      <div class="pulse"><i></i><i></i><i></i>
+        <span class="core">${isAxis
+          ? `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round"><path d="M5 12h14M12 5v14"/><circle cx="12" cy="12" r="9"/></svg>`
+          : `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3.4" fill="currentColor" stroke="none"/></svg>`}</span>
+      </div>
+      <div class="big" id="cap-big">Listening…</div>
+      <div class="small">${isAxis ? "Sweep it end to end" : "Any button on the stick or throttle"}</div>
+      <div class="count" id="cap-count"></div>
+      <p class="note" style="margin-top:14px">Output to the Xbox is paused while listening,
+        so nothing you press reaches the game.</p>
+    </div>
+    <div class="btnrow" style="margin-top:14px">
+      <button class="btn ghost block" data-x>Cancel</button>
+    </div>`);
+  sheet.querySelector("[data-x]").onclick = () => { stopCapture(); closeSheet(); };
+  onClose = stopCapture;
+
+  try { await api("/api/capture", { method: "POST", body: JSON.stringify({ kind }) }); }
+  catch (e) { toast(e.message, true); closeSheet(); return; }
+
+  capTimer = setInterval(async () => {
+    let s;
+    try { s = await api("/api/capture"); } catch { return; }
+    if (s.state === "listening") {
+      const c = sheet.querySelector("#cap-count");
+      if (c) c.textContent = `${s.seconds_left}s left`;
+      return;
+    }
+    stopCapture();
+    if (s.state === "detected") {
+      if (opts.skipTarget) return opts.onPick(s.name, s);
+      isAxis ? afterAxisCapture(s) : afterButtonCapture(s);
+    } else {
+      const b = sheet.querySelector("#cap-big");
+      if (b) { b.textContent = "Nothing detected"; b.classList.add("warn"); }
+      const c = sheet.querySelector("#cap-count");
+      if (c) c.innerHTML = `<button class="btn sm" id="cap-retry" style="margin-top:8px">Try again</button>`;
+      const r = sheet.querySelector("#cap-retry");
+      if (r) r.onclick = () => captureSheet(kind, opts);
+    }
+  }, 400);
+}
+function stopCapture() {
+  if (capTimer) { clearInterval(capTimer); capTimer = null; }
+  fetch("/api/capture", { method: "DELETE" }).catch(() => {});
+}
+const foundBlock = d => `
+  <div class="found">
+    <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span>
+    <span><span class="n">${esc(hw(d.name))}</span><span class="c mono">${esc(d.name)}</span></span>
+  </div>`;
+
+/* --- picking an Xbox button ------------------------------------------- */
+function targetPicker(groups, desc, sel, multi) {
+  return groups.map(([label, keys]) => `
+    <div class="grp"><div class="gl">${esc(label)}</div><div class="chips">
+      ${keys.map(k => `<button class="chip" data-k="${k}" aria-pressed="${sel.includes(k)}">
+        ${xbGlyph(k)}<span class="lbl2">${esc((desc[k] || k))}</span></button>`).join("")}
+    </div></div>`).join("");
+}
+function wirePicker(multi, sel, onChange) {
+  sheet.querySelectorAll(".chip").forEach(c => c.onclick = () => {
+    const k = c.dataset.k;
+    if (multi) {
+      const i = sel.indexOf(k);
+      i < 0 ? sel.push(k) : sel.splice(i, 1);
+    } else {
+      sel.length = 0; sel.push(k);
+    }
+    sheet.querySelectorAll(".chip").forEach(x =>
+      x.setAttribute("aria-pressed", sel.includes(x.dataset.k)));
+    onChange && onChange();
+  });
+}
+
+function afterButtonCapture(d) {
+  const code = d.name;
+  const existing = bindingRows().find(r => r.code === code);
+  buttonTargetSheet(code, existing ? existing.target : null, foundBlock(d),
+    existing && !existing.own ? "This is already inherited — saving makes it yours." : "");
+}
+function pickButtonTarget(row) {
+  buttonTargetSheet(row.code, row.target, "", row.own ? "" : "Inherited from the parent layout.");
+}
+function buttonTargetSheet(code, current, header, hint) {
+  const sel = current == null ? [] : (Array.isArray(current) ? [...current] : [current]);
+  const inh = ((inherited.buttons || {})[curMode] || {})[code];
+  openSheet(`
+    ${header}
+    <h3>${esc(hw(code))}</h3>
+    <p class="lead">What should it do on the Xbox? ${hint ? esc(hint) : ""}
+      Pick more than one to press them together.</p>
+    <div id="pk">${targetPicker(BTN_GROUPS, BTN_DESC, sel, true)}</div>
+    <div class="btnrow" style="margin-top:4px">
+      <button class="btn ghost" style="flex:1" data-x>Cancel</button>
+      <button class="btn primary" style="flex:2" data-ok>Done</button>
+    </div>
+    <div class="btnrow" style="margin-top:8px">
+      ${inh !== undefined && (raw.buttons || {})[curMode]?.[code] !== undefined
+        ? '<button class="btn sm ghost block" data-revert>Revert to inherited</button>' : ""}
+      <button class="btn sm danger block" data-del>Unbind this button</button>
+    </div>`);
+  wirePicker(true, sel);
+  sheet.querySelector("[data-x]").onclick = closeSheet;
+  sheet.querySelector("[data-ok]").onclick = () => {
+    if (!sel.length) return toast("Pick at least one, or use Unbind", true);
+    setBinding(code, sel.length === 1 ? sel[0] : sel);
+    closeSheet(); toast(`${hw(code)} → ${sel.map(k => XB[k]?.l || k).join(" + ")}`);
+  };
+  const rev = sheet.querySelector("[data-revert]");
+  if (rev) rev.onclick = () => {
+    delete raw.buttons[curMode][code];
+    setDirty(true); renderBindings(); closeSheet(); toast("Reverted to inherited");
+  };
+  sheet.querySelector("[data-del]").onclick = () => {
+    raw.buttons = raw.buttons || {};
+    raw.buttons[curMode] = raw.buttons[curMode] || {};
+    // null tells the merge to drop an inherited binding; with no parent
+    // binding there is nothing to drop, so just remove the key.
+    if (inh !== undefined) raw.buttons[curMode][code] = null;
+    else delete raw.buttons[curMode][code];
+    setDirty(true); renderBindings(); closeSheet(); toast("Unbound");
+  };
+}
+function setBinding(code, target) {
   raw.buttons = raw.buttons || {};
-  const bmap = {};
-  for (const tr of $("btable").querySelectorAll("tbody tr")) {
-    const code = tr.querySelector(".b-code").value.trim();
-    if (!code) continue;
-    const ti = tr.querySelector(".b-target");
-    if (ti.dataset.inh !== undefined) continue;   // untouched inherited row
-    const t = ti.value.trim();
-    bmap[code] = t === "" ? null : split(t);      // null = bind to nothing
-  }
-  if (Object.keys(bmap).length) raw.buttons[curMode] = bmap;
-  else delete raw.buttons[curMode];
+  raw.buttons[curMode] = raw.buttons[curMode] || {};
+  raw.buttons[curMode][code] = target;
+  setDirty(true); renderBindings();
 }
-const split = s => {
-  const parts = s.split(",").map(x => x.trim()).filter(Boolean);
-  return parts.length > 1 ? parts : parts[0];
+
+/* --- picking an axis target ------------------------------------------- */
+function afterAxisCapture(d) {
+  axisTargetSheet(d.name, foundBlock(d), d);
+}
+function pickAxisTarget(code) { axisTargetSheet(code, "", null); }
+
+function axisTargetSheet(code, header, detected) {
+  const eff = effAxis(code) || {};
+  const sel = eff.target ? [eff.target] : [];
+  openSheet(`
+    ${header}
+    <h3>${esc(hw(code))}</h3>
+    <p class="lead">Where should this axis go on the Xbox?</p>
+    <div id="pk">${targetPicker(AXIS_GROUPS, AXIS_DESC, sel, false)}</div>
+    <div class="grp"><div class="gl">Or use it as buttons</div>
+      <button class="btn block" data-asbtn>
+        Press buttons instead of moving a stick
+      </button>
+      <p class="note">Good for a twist axis that should work like LB / RB.</p>
+    </div>
+    <div class="btnrow" style="margin-top:4px">
+      <button class="btn ghost" style="flex:1" data-x>Cancel</button>
+      <button class="btn primary" style="flex:2" data-ok>Done</button>
+    </div>`);
+  wirePicker(false, sel);
+  sheet.querySelector("[data-x]").onclick = closeSheet;
+  sheet.querySelector("[data-asbtn]").onclick = () => axisAsButtons(code, detected);
+  sheet.querySelector("[data-ok]").onclick = () => {
+    if (!sel.length) return toast("Pick a target", true);
+    raw.axes = raw.axes || {};
+    const cur = Object.assign({}, raw.axes[code] || {});
+    cur.target = sel[0];
+    delete cur.button_low; delete cur.button_high; delete cur.button_threshold;
+    // A brand-new axis needs a sane deadzone; inherited ones keep theirs.
+    // Which way it points is NOT guessed from the sweep — that only says which
+    // way it was pushed first, not which way the game should read as forward.
+    // The tuning panel opens right below with Invert one tap away.
+    if (detected && !(inherited.axes || {})[code] && cur.deadzone === undefined)
+      cur.deadzone = sel[0] === "split_lt_rt" ? 0.06 : 0.08;
+    raw.axes[code] = cur;
+    setDirty(true); closeSheet();
+    renderAxes(code);
+    toast(`${hw(code)} → ${XB[sel[0]]?.l || sel[0]}`);
+  };
+}
+function axisAsButtons(code, detected) {
+  const eff = effAxis(code) || {};
+  const lo = eff.button_low  ? (Array.isArray(eff.button_low)  ? [...eff.button_low]  : [eff.button_low])  : [];
+  const hi = eff.button_high ? (Array.isArray(eff.button_high) ? [...eff.button_high] : [eff.button_high]) : [];
+  let step = 0;
+  const draw = () => {
+    const sel = step === 0 ? lo : hi;
+    openSheet(`
+      <h3>${esc(hw(code))}</h3>
+      <p class="lead">${step === 0
+        ? "Which button should fire when you work it <b>one way</b> (back / left)?"
+        : "And when you work it the <b>other way</b> (forward / right)?"}</p>
+      <div class="segbar" style="pointer-events:none">
+        <button class="${step === 0 ? "on" : ""}">1 · One way</button>
+        <button class="${step === 1 ? "on" : ""}">2 · The other</button>
+      </div>
+      <div id="pk">${targetPicker(BTN_GROUPS, BTN_DESC, sel, true)}</div>
+      <div class="btnrow" style="margin-top:4px">
+        <button class="btn ghost" style="flex:1" data-back>${step === 0 ? "Cancel" : "Back"}</button>
+        <button class="btn primary" style="flex:2" data-next>${step === 0 ? "Next" : "Done"}</button>
+      </div>`);
+    wirePicker(true, sel);
+    sheet.querySelector("[data-back]").onclick = () =>
+      step === 0 ? closeSheet() : (step = 0, draw());
+    sheet.querySelector("[data-next]").onclick = () => {
+      if (step === 0) { step = 1; return draw(); }
+      raw.axes = raw.axes || {};
+      const cur = Object.assign({}, raw.axes[code] || {});
+      cur.target = null;                    // stop it driving a stick
+      if (lo.length) cur.button_low  = lo.length === 1 ? lo[0] : lo;
+      else delete cur.button_low;
+      if (hi.length) cur.button_high = hi.length === 1 ? hi[0] : hi;
+      else delete cur.button_high;
+      if (!lo.length && !hi.length) return toast("Pick at least one button", true);
+      if (cur.button_threshold === undefined) cur.button_threshold = 0.35;
+      raw.axes[code] = cur;
+      setDirty(true); renderAxes(); closeSheet();
+      toast(`${hw(code)} → buttons`);
+    };
+  };
+  draw();
+}
+
+$("#e-addbtn").onclick = () => captureSheet("button", {});
+$("#e-addax").onclick  = () => captureSheet("axis", {});
+
+/* --- raw json / preview ----------------------------------------------- */
+$("#e-raw").onclick = () => {
+  openSheet(`
+    <h3>Raw JSON</h3>
+    <p class="lead">The file exactly as it's stored. Only what differs from the
+      parent lives here.</p>
+    <textarea id="rj" spellcheck="false">${esc(JSON.stringify(raw, null, 2))}</textarea>
+    <div class="err" id="rj-err" style="display:none"></div>
+    <div class="btnrow" style="margin-top:10px">
+      <button class="btn ghost" style="flex:1" data-x>Cancel</button>
+      <button class="btn primary" style="flex:1" data-ok>Apply</button>
+    </div>`);
+  sheet.querySelector("[data-x]").onclick = closeSheet;
+  sheet.querySelector("[data-ok]").onclick = () => {
+    try { raw = JSON.parse(sheet.querySelector("#rj").value); }
+    catch (e) {
+      const el = sheet.querySelector("#rj-err");
+      el.style.display = ""; el.textContent = "Bad JSON: " + e.message; return;
+    }
+    setDirty(true); closeSheet(); showEditor(); toast("Applied — Save to keep it");
+  };
+};
+$("#e-preview").onclick = async () => {
+  try {
+    const j = await api(`/api/layouts/${editName}`);
+    openSheet(`
+      <h3>Resolved layout</h3>
+      <p class="lead">Everything this layout actually uses, with inheritance applied.
+        This is the saved version.</p>
+      <textarea readonly spellcheck="false">${esc(JSON.stringify(j.resolved, null, 2))}</textarea>
+      <div class="btnrow" style="margin-top:10px">
+        <button class="btn block" data-x>Close</button></div>`);
+    sheet.querySelector("[data-x]").onclick = closeSheet;
+  } catch (e) { toast(e.message, true); }
 };
 
-function harvestForm() {
-  harvestAxes(); harvestButtons();
-  raw.display_name = $("f-display").value || undefined;
-  raw.short_name = $("f-short").value || undefined;
-  raw.inherits = $("f-inherits").value || undefined;
-  raw.order = $("f-order").value === "" ? undefined : parseInt($("f-order").value);
-  raw.suspend_button = $("f-suspend").value || undefined;
-  raw.layout_switch_button = $("f-switch").value || undefined;
-  const hat = $("f-hat").checked;
-  raw.hat_to_dpad = ("hat_to_dpad" in origRaw || hat !== (inherited.hat_to_dpad !== false))
-    ? hat : undefined;
-  for (const k of Object.keys(raw)) if (raw[k] === undefined) delete raw[k];
+/* ═══ save ══════════════════════════════════════════════════════════════ */
+function harvestSetup() {
+  const put = (k, v) => { if (v === undefined || v === "" || v === null) delete raw[k]; else raw[k] = v; };
+  put("display_name", $("#f-display").value.trim());
+  put("short_name",   $("#f-short").value.trim());
+  const o = $("#f-order").value;
+  put("order", o === "" ? undefined : parseInt(o, 10));
+  put("inherits", $("#f-inherits").value || undefined);
+  const hat = $("#f-hat").getAttribute("aria-checked") === "true";
+  // Keep a key the file already had; add one only when it changes something.
+  if ("hat_to_dpad" in origRaw || hat !== (inherited.hat_to_dpad !== false))
+    raw.hat_to_dpad = hat;
+  else delete raw.hat_to_dpad;
 }
-
-// ── raw JSON toggle ─────────────────────────────────────────────────────────
-$("rawtoggle").onclick = () => {
-  if (!rawMode) {
-    harvestForm();
-    $("rawjson").value = JSON.stringify(raw, null, 2);
-  } else {
-    try { raw = JSON.parse($("rawjson").value); }
-    catch (e) { return alert("Bad JSON: " + e.message); }
-    fillForm();
-  }
-  rawMode = !rawMode;
-  syncRawVisibility();
-};
-function syncRawVisibility() {
-  $("rawjson").style.display = rawMode ? "block" : "none";
-  $("formview").style.display = rawMode ? "none" : "block";
-  $("rawtoggle").textContent = rawMode ? "form view" : "raw JSON";
-}
-
-// ── save ────────────────────────────────────────────────────────────────────
-$("savebtn").onclick = async () => {
-  $("problems").textContent = ""; $("savemsg").textContent = "";
-  if (rawMode) {
-    try { raw = JSON.parse($("rawjson").value); }
-    catch (e) { return $("problems").textContent = "Bad JSON: " + e.message; }
-  } else harvestForm();
+$("#sb-save").onclick = async () => {
+  harvestSetup();
+  $("#e-err").style.display = "none";
   try {
     const j = await api(`/api/layouts/${editName}`,
-      {method: "PUT", body: JSON.stringify(raw)});
-    $("savemsg").textContent = "saved" + (j.applied === true ? " + applied live" : "");
-    const r = await api(`/api/layouts/${editName}`);
-    $("resolved").textContent = JSON.stringify(r.resolved, null, 2);
-    poll();
-  } catch (e) { $("problems").textContent = e.message; }
+      { method: "PUT", body: JSON.stringify(raw) });
+    setDirty(false);
+    origRaw = JSON.parse(JSON.stringify(raw));
+    toast(j.applied === true ? "Saved — applied live" : "Saved");
+    await poll();
+    const fresh = await api(`/api/layouts/${editName}`);
+    inherited = fresh.inherited || {};
+    raw = fresh.raw; origRaw = JSON.parse(JSON.stringify(fresh.raw));
+    showEditor();
+  } catch (e) {
+    const el = $("#e-err");
+    el.style.display = ""; el.textContent = e.message;
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    toast("Couldn't save", true);
+  }
 };
+$("#sb-revert").onclick = () => confirmSheet(
+  "Discard changes?", "Everything since your last save will be lost.", "Discard",
+  () => {
+    raw = JSON.parse(JSON.stringify(origRaw));
+    setDirty(false); showEditor(); toast("Changes discarded");
+  });
+window.addEventListener("beforeunload", e => { if (dirty) { e.preventDefault(); e.returnValue = ""; } });
 
-// ── init ────────────────────────────────────────────────────────────────────
-(async () => {
-  try {
-    codes = await api("/api/codes");
-    $("axcodes").innerHTML = codes.axes.map(c => `<option>${c}</option>`).join("");
-    $("btncodes").innerHTML = codes.buttons.map(c => `<option>${c}</option>`).join("");
-    $("targethint").textContent = codes.button_targets.join(" ");
-  } catch (e) {}
-  poll();
-  setInterval(poll, 2000);
-})();
+/* ═══ go ════════════════════════════════════════════════════════════════ */
+poll();
+setInterval(() => { if (!scrim.classList.contains("on")) poll(); }, 2500);
 </script>
 </body>
 </html>
