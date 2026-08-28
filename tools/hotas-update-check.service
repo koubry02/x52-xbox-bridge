@@ -1,0 +1,10 @@
+[Unit]
+Description=HOTAS Bridge - check whether an update is available
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/hotas-bridge/tools/update.sh check
+Nice=10
+TimeoutStartSec=180

@@ -260,6 +260,10 @@ h2.sec:first-child { margin-top: 2px; }
 .tag.live { background: color-mix(in srgb, var(--green) 18%, transparent);
             color: var(--green); border: 1px solid color-mix(in srgb, var(--green) 40%, transparent); }
 .tag.inh  { background: var(--surface-2); color: var(--txt-3); letter-spacing: .1em; }
+.tag.hot  { background: color-mix(in srgb, var(--amber) 18%, transparent);
+            color: var(--amber); border: 1px solid color-mix(in srgb, var(--amber) 40%, transparent); }
+.tag.bad  { background: color-mix(in srgb, var(--red) 16%, transparent);
+            color: var(--red); border: 1px solid color-mix(in srgb, var(--red) 40%, transparent); }
 
 /* ── binding rows ───────────────────────────────────────────────────────── */
 .bind {
@@ -431,6 +435,40 @@ textarea { min-height: 300px; resize: vertical; font-family: ui-monospace, monos
 }
 .segbar button.on { background: var(--surface-3); color: var(--txt); }
 
+/* The updater's running commentary. Deliberately a terminal: this is the one
+   place in the app where you want to see exactly what the machine did, in the
+   order it did it, including the part that happened while the page was dark. */
+.ulog {
+  margin-top: 13px; padding: 11px 12px; max-height: 210px; overflow-y: auto;
+  background: var(--bg-soft); border: 1px solid var(--line);
+  border-radius: var(--r-sm); font-size: 11.5px; line-height: 1.75;
+  overscroll-behavior: contain;
+}
+.ulog .r { display: flex; gap: 9px; align-items: baseline; }
+.ulog .m { color: var(--txt-2); flex: 1; word-break: break-word; }
+.ulog .g { width: 9px; flex: none; text-align: center; color: var(--txt-3); }
+.ulog .r.ok  .g { color: var(--green); }
+.ulog .r.ok  .m { color: var(--txt); }
+.ulog .r.failed .g, .ulog .r.failed .m { color: var(--red); }
+.ulog .r.rolled-back .g, .ulog .r.rolled-back .m { color: var(--amber); }
+.ulog .r.run .m { color: var(--txt); }
+.ulog .r.info .m { color: var(--txt-3); font-family: ui-monospace, monospace; font-size: 11px; }
+/* The blackout while the service restarts is a normal part of an update, not
+   a fault — so it reads as progress rather than as the connection dropping. */
+.ulog .r.wait .m { color: var(--amber); }
+.ulog .r.wait .g { color: var(--amber); }
+
+/* Where the code comes from. Small, quiet, and always visible — you should be
+   able to see at a glance that the board is still pulling from the project and
+   not from somewhere you don't recognise. */
+.srcrow { display: flex; align-items: center; gap: 10px; margin-top: 14px;
+          padding-top: 13px; border-top: 1px solid var(--line-soft); }
+.srcrow .s1 { font-family: inherit; font-weight: 600; font-size: 10px; line-height: 1;
+              text-transform: uppercase; letter-spacing: .13em; color: var(--txt-3); flex: none; }
+.srcrow .s2 { flex: 1; font-size: 11.5px; color: var(--txt-2); min-width: 0;
+              overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.srcrow .s2.custom { color: var(--amber); }
+
 .note { color: var(--txt-3); font-size: 12px; line-height: 1.6; margin: 11px 2px 0; }
 .note code { background: var(--surface-2); border-radius: var(--r-xs); padding: 1px 5px;
              font-family: ui-monospace, monospace; font-size: 11px; color: var(--txt-2); }
@@ -558,6 +596,30 @@ textarea { min-height: 300px; resize: vertical; font-family: ui-monospace, monos
       <p class="note" id="s-latnote"></p>
     </div>
     <p class="note" id="s-dev"></p>
+
+    <h2 class="sec">System</h2>
+    <div class="card" id="s-sys">
+      <div class="trow">
+        <div class="txt">
+          <div class="t1" id="u-ver">Checking version…</div>
+          <div class="t2 mono" id="u-sub">—</div>
+        </div>
+        <span class="tag live" id="u-tag" style="display:none"></span>
+      </div>
+      <div class="btnrow" style="margin-top:13px">
+        <button class="btn sm ghost" id="u-check">Check for updates</button>
+        <button class="btn sm primary" id="u-apply" style="display:none">Install it</button>
+      </div>
+      <div class="ulog mono" id="u-log" style="display:none"></div>
+      <div class="srcrow">
+        <div class="s1">Updates come from</div>
+        <div class="s2 mono" id="u-src">—</div>
+        <button class="btn sm ghost" id="u-srcedit">Change</button>
+      </div>
+      <p class="note" id="u-note">Pulls from the project's repository, checks the
+        new code before touching anything, then restarts the bridge. If it
+        doesn't come back up, the board puts the old version back by itself.</p>
+    </div>
   </section>
 
   <!-- ─── LAYOUTS ────────────────────────────────────────────────────── -->
@@ -935,6 +997,13 @@ async function poll() {
   renderLatency(s);
 
   renderLayouts();
+  // Read the deployed version once, on the first poll that gets through the
+  // gate. After that the System card only refreshes while an update is running.
+  if (!upBooted) upTick().then(u => { if (u) upBooted = true; });
+  // Whether "Install it" is offered depends on the Xbox being disconnected, so
+  // redraw the card from what we already know each time the status changes.
+  // No request — the version and the log only change while a run is going.
+  else if (upLast && !upTimer) renderUpdate(upLast);
 }
 /* Where the latency actually goes. "On this board" is measured exactly: the
    kernel timestamps the input the instant the stick moves, and we compare that
@@ -998,6 +1067,202 @@ function mfdLines(s, act) {
 const fmtUp = s => s == null ? "—"
   : s >= 3600 ? `${Math.floor(s/3600)}h ${Math.floor(s%3600/60)}m`
   : s >= 60 ? `${Math.floor(s/60)}m` : `${s}s`;
+
+/* ═══ system / updates ══════════════════════════════════════════════════
+   Updating restarts the very server that serves this page, so the page has to
+   survive losing it. Nothing is streamed: the updater appends one JSON line
+   per step to a file on disk, and we re-read the whole file each poll. That
+   way the blackout during the restart costs nothing — when the bridge comes
+   back we read the steps it took while we were dark, including a rollback.
+
+   We only poll this while something is actually happening. Every request
+   here costs the Pi two `systemctl is-active` forks on the same interpreter
+   that is feeding the Xbox, so it stays off the 2.5s status loop. */
+let upLast = null, upTimer = null, upBlackout = 0, upTicks = 0, upBooted = false;
+const UP_GLYPH = { ok: "✓", failed: "✕", "rolled-back": "!", run: "…",
+                   wait: "…", uptodate: "✓", available: "↓", updated: "✓",
+                   info: "·" };
+
+const upRow = e => `<div class="r ${esc(e.state || "info")}">`
+  + `<span class="g">${esc(UP_GLYPH[e.state] || "·")}</span>`
+  + `<span class="m">${esc(e.msg)}</span></div>`;
+
+function renderUpLog(log, extra) {
+  const box = $("#u-log");
+  const rows = (log || []).map(upRow).join("") + (extra ? upRow(extra) : "");
+  if (!rows) { box.style.display = "none"; box.innerHTML = ""; return; }
+  // Only follow the tail if the reader is already at it — otherwise scrolling
+  // back to re-read a step yanks you away from it on the next tick.
+  const stuck = box.scrollHeight - box.scrollTop - box.clientHeight < 26;
+  box.style.display = ""; box.innerHTML = rows;
+  if (stuck) box.scrollTop = box.scrollHeight;
+}
+
+/* The last word of a finished run: "done" carries the verdict. */
+const upVerdict = u => [...(u.log || [])].reverse().find(e => e.step === "done");
+
+function renderUpdate(u) {
+  upLast = u;
+  const v = u.version || {};
+  $("#u-ver").textContent = v.subject || (v.commit ? "Installed" : "Version unknown");
+  $("#u-sub").textContent = v.commit || "no version stamp — installed by hand";
+
+  const done = upVerdict(u);
+  const tag = $("#u-tag"), chk = $("#u-check"), app = $("#u-apply");
+  const st = u.running ? "run" : (done ? done.state : null);
+  const TAGS = {
+    uptodate:      ["Up to date", "live"],
+    available:     ["Update ready", "hot"],
+    updated:       ["Updated", "live"],
+    "rolled-back": ["Rolled back", "hot"],
+    failed:        ["Failed", "bad"],
+    run:           ["Working", "hot"],
+  };
+  const t = TAGS[st];
+  tag.style.display = t ? "" : "none";
+  if (t) { tag.textContent = t[0]; tag.className = "tag " + t[1]; }
+
+  chk.disabled = !!u.running;
+  chk.textContent = u.running ? "Working…" : "Check for updates";
+
+  // Offer the install only when there is genuinely something to install, and
+  // never while the Xbox is holding the controls — the server refuses that
+  // anyway, but a button you can press and be told off by is bad manners.
+  const ready = !u.running && done && done.state === "available";
+  app.style.display = ready ? "" : "none";
+  app.disabled = ready && !!status.connected;
+  $("#u-note").textContent =
+    u.running ? "Leave this page open — it keeps reading the board's own log."
+    : ready && status.connected
+      ? "Disconnect Oberon Remote on the Xbox first: installing restarts the bridge."
+    : ready ? "Installs, restarts, and checks the bridge came back. If it didn't, "
+            + "the board puts this version back by itself."
+    : "Pulls from the project's repository, checks the new code before touching "
+    + "anything, then restarts the bridge. If it doesn't come back up, the board "
+    + "puts the old version back by itself.";
+
+  const src = u.source || {};
+  const short = String(src.repo || "").replace(/^https:\/\/(www\.)?github\.com\//, "");
+  $("#u-src").textContent = short + (src.branch && src.branch !== "main" ? " · " + src.branch : "");
+  $("#u-src").className = "s2 mono" + (src.custom ? " custom" : "");
+  $("#u-src").title = (src.repo || "") + " · " + (src.branch || "");
+  $("#u-srcedit").disabled = !!u.running;
+
+  renderUpLog(u.log);
+}
+
+/* Changing this decides what code the board will run, so it goes through the
+   same fresh-PIN check as installing does — see PRIVILEGED_PATHS in webapp.py.
+   The "Use the project's repository" button exists so getting back to safety
+   is one tap and never a typing exercise. */
+$("#u-srcedit").onclick = () => {
+  const src = (upLast && upLast.source) || {};
+  openSheet(`
+    <h3>Where updates come from</h3>
+    <p class="lead">Point the board at your own fork if you keep one. It has to
+      be reachable from the board over https.</p>
+    <div class="field"><label>Repository</label>
+      <input type="text" id="sc-repo" autocomplete="off" spellcheck="false"
+        placeholder="https://github.com/owner/name" value="${esc(src.repo || "")}"></div>
+    <div class="field"><label>Branch</label>
+      <input type="text" id="sc-branch" autocomplete="off" spellcheck="false"
+        placeholder="main" value="${esc(src.branch || "")}"></div>
+    <div class="err" id="sc-err" style="display:none"></div>
+    <div class="btnrow">
+      <button class="btn ghost" style="flex:1" data-x>Cancel</button>
+      <button class="btn primary" style="flex:1" data-ok>Save</button>
+    </div>
+    <div class="btnrow" style="margin-top:9px">
+      <button class="btn ghost block" id="sc-def">Use the project's repository</button>
+    </div>`);
+  const err = m => { const e = sheet.querySelector("#sc-err"); e.style.display = ""; e.textContent = m; };
+  const send = body => privileged(async () => {
+    let j;
+    try {
+      j = await api("/api/update/source",
+        { method: "POST", body: JSON.stringify(body) });
+    } catch (e) {
+      if (e.stepup) throw e;          // let privileged() ask for the PIN
+      return err(e.message);          // a rejected address belongs in the form
+    }
+    closeSheet();
+    if (upLast) { upLast.source = j; renderUpdate(upLast); }
+    toast(j.custom ? "Now following " + j.repo.replace(/^https:\/\//, "")
+                   : "Back to the project's repository");
+  });
+  sheet.querySelector("[data-x]").onclick = closeSheet;
+  sheet.querySelector("#sc-def").onclick = () => send({ default: true });
+  sheet.querySelector("[data-ok]").onclick = () => send({
+    repo: sheet.querySelector("#sc-repo").value.trim(),
+    branch: sheet.querySelector("#sc-branch").value.trim() });
+};
+
+async function upTick() {
+  let u;
+  try { u = await api("/api/update"); }
+  catch (e) {
+    if (e.message === "locked") return;    // the gate is up; it will re-poll
+    // The bridge being unreachable mid-update is the restart, not a fault.
+    upBlackout++;
+    $("#u-check").disabled = true;
+    $("#u-apply").style.display = "none";
+    renderUpLog(upLast && upLast.log, {
+      state: upBlackout > 60 ? "failed" : "wait",
+      msg: upBlackout > 60
+        ? "The bridge hasn't come back. Recover over SSH — see the README."
+        : "Restarting — waiting for the bridge to come back…" });
+    return;
+  }
+  upBlackout = 0;
+  renderUpdate(u);
+  return u;
+}
+
+/* Watch until the run finishes. Nothing here trusts a single reading: the
+   unit is started with --no-block, so for the first moment it is neither
+   running nor finished. We stop only on a verdict. */
+function upWatch() {
+  clearInterval(upTimer); upTicks = 0;
+  $("#u-log").style.display = "";
+  const tick = async () => {
+    upTicks++;
+    const u = await upTick();
+    const finished = u && !u.running && upVerdict(u);
+    // ~6 minutes: long enough for a clone on a slow link plus the 45s health
+    // wait and a rollback, short enough not to poll forever on a lost cause.
+    if (finished || upTicks > 300) {
+      clearInterval(upTimer); upTimer = null;
+      if (!finished) return;
+      const bad = finished.state === "failed" || finished.state === "rolled-back";
+      toast(({ uptodate: "Already up to date", available: "An update is ready",
+               updated: "Updated and back up",
+               "rolled-back": "Rolled back — read the log",
+             })[finished.state] || "Update failed", bad);
+      // A finished apply means the code on disk changed under us. This page
+      // came from the OLD build, so re-reading /api/status is not enough —
+      // reload, and let the first poll after it redraw the finished log.
+      if (finished.state === "updated") setTimeout(() => location.reload(), 2500);
+      else if (finished.state === "rolled-back") poll();
+    }
+  };
+  upTimer = setInterval(tick, 1200);
+  tick();
+}
+
+$("#u-check").onclick = async () => {
+  $("#u-check").disabled = true;
+  try { await api("/api/update/check", { method: "POST" }); upWatch(); }
+  catch (e) { $("#u-check").disabled = false; toast(e.message, true); }
+};
+$("#u-apply").onclick = () => confirmSheet(
+  "Install this update?",
+  "The bridge restarts, so the stick goes dead for a few seconds. If the new "
+  + "version doesn't come up, the board puts this one back by itself.",
+  "Install",
+  () => privileged(async () => {
+    await api("/api/update/apply", { method: "POST" });
+    upWatch();
+  }));
 
 $("#s-menu").onclick = async () => {
   const on = $("#s-menu").getAttribute("aria-checked") !== "true";

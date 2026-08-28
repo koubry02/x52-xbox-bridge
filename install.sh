@@ -15,7 +15,11 @@ set -e
 
 ROLE="${1:-}"
 SRC="$(cd "$(dirname "$0")" && pwd)"
-DST="/opt/hotas-bridge"
+# Overridable so an update can be rehearsed against a throwaway tree. Nothing
+# sets these in normal use — leave them alone and everything lands where the
+# documentation says it does.
+DST="${HOTAS_DST:-/opt/hotas-bridge}"
+SYSTEMD="${HOTAS_SYSTEMD:-/etc/systemd/system}"
 
 if [ "$(id -u)" -ne 0 ]; then
     echo "ERROR: run with sudo"; exit 1
@@ -37,6 +41,13 @@ if [ -d "$DST/layouts" ]; then
 fi
 rsync -a --delete --filter='protect layouts/**' "$SRC"/ "$DST"/ 2>/dev/null \
     || cp -r "$SRC"/. "$DST"/
+
+# Stamp what we just deployed, so the updater and the web app can say which
+# version is running.
+if git -C "$SRC" rev-parse HEAD >/dev/null 2>&1; then
+    { git -C "$SRC" rev-parse HEAD
+      git -C "$SRC" log -1 --pretty=%s; } > "$DST/VERSION" 2>/dev/null || true
+fi
 chmod +x "$DST"/proxy/*.sh "$DST"/tools/*.sh 2>/dev/null || true
 # Ensure every shell script is 777 on the installed copy
 find "$DST" -name "*.sh" -type f -exec chmod 777 {} \; 2>/dev/null || true
@@ -48,14 +59,21 @@ svc_install() {   # $1 = service filename, found anywhere in $DST
     local f
     f=$(find "$DST" -name "$1" | head -1)
     if [ -z "$f" ]; then echo "ERROR: $1 not found in $DST"; exit 1; fi
-    cp "$f" /etc/systemd/system/"$1"
-    echo "  installed /etc/systemd/system/$1"
+    mkdir -p "$SYSTEMD"
+    cp "$f" "$SYSTEMD"/"$1"
+    echo "  installed $SYSTEMD/$1"
 }
 
 case "$ROLE" in
 # ─────────────────────────────────────────────────────────────────────────────
   oberon)
     echo "=== Mode: Oberon (single Pi) ==="
+    # DEPS=no skips the slow, network-bound parts. The self-updater sets it:
+    # dependencies do not change between commits, and an update should not
+    # wait on apt.
+    if [ "${DEPS:-yes}" = "no" ]; then
+        echo "--- Skipping dependency install (DEPS=no) ---"
+    else
     echo "--- Installing Python deps ---"
     apt-get update -qq
     apt-get install -y -qq python3-evdev iw
@@ -66,6 +84,8 @@ case "$ROLE" in
         apt-get install -y -qq python3-websockets
     else
         pip3 install --break-system-packages "websockets>=12"
+    fi
+
     fi
 
     # ---- Optional: X52 Pro MFD status display (libx52) ----
@@ -125,10 +145,14 @@ case "$ROLE" in
     # nothing and costs a flight stick 100-200ms. Everything else in this
     # project runs in well under a millisecond, so this is the one knob that
     # actually decides how the link feels.
-    echo "--- Tuning the WiFi link ---"
-    bash "$DST/tools/wifi_tune.sh" || echo "  (skipped; run tools/wifi_tune.sh by hand)"
+    if [ "${DEPS:-yes}" != "no" ]; then
+        echo "--- Tuning the WiFi link ---"
+        bash "$DST/tools/wifi_tune.sh" || echo "  (skipped; run tools/wifi_tune.sh by hand)"
+    fi
 
     svc_install hotas-oberon.service
+    svc_install hotas-update.service
+    svc_install hotas-update-check.service
     systemctl daemon-reload
     systemctl enable --now hotas-oberon.service
 

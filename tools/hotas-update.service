@@ -1,0 +1,13 @@
+[Unit]
+Description=HOTAS Bridge - pull and install an update
+# Its own unit on purpose: hotas-oberon's cgroup is killed on restart, so an
+# updater running inside it would kill itself mid-deploy.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/hotas-bridge/tools/update.sh apply
+# Below the input path — an update must never make the stick stutter.
+Nice=10
+TimeoutStartSec=600

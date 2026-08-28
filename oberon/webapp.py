@@ -22,6 +22,12 @@ API:
   GET  /api/auth                   who am I, and are my sessions
   POST /api/auth/logout            drop this session
   POST /api/auth/revoke-all        drop every session   [privileged]
+  GET  /api/update                 deployed version + this run's progress log
+  POST /api/update/source          point the board at another repo/branch
+                                   [privileged: needs a fresh PIN]
+  POST /api/update/check           ask the repo what is available
+  POST /api/update/apply           install it, restart, roll back if broken
+                                   [privileged: needs a fresh PIN]
 
 AUTH. Everything but the page shell and the PIN request needs a bearer token,
 obtained by reading a PIN off the X52's screen (or root's journal) — proof you
@@ -38,9 +44,11 @@ needs.
 
 import ipaddress
 import json
+import subprocess
 import os
 import re
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import auth as auth_mod
@@ -53,6 +61,29 @@ except ImportError:
 
 _INDEX = os.path.join(os.path.dirname(__file__), "web", "index.html")
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_\-]{0,31}$")
+
+# Where updates come from unless the owner points the board somewhere else.
+DEFAULT_REPO = "https://github.com/koubry02/x52-xbox-bridge"
+DEFAULT_BRANCH = "main"
+
+# Deliberately narrow. This string is handed to `git clone`, so it decides what
+# code the board will run: only plain https, only a host and an owner/repo path,
+# and never something starting with "-", which git would read as an option
+# rather than a URL.
+_REPO_RE = re.compile(
+    r"^https://[A-Za-z0-9][A-Za-z0-9.\-]*(:[0-9]{1,5})?"
+    r"/[A-Za-z0-9][A-Za-z0-9._\-]*/[A-Za-z0-9][A-Za-z0-9._\-]*(\.git)?/?$")
+_BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/\-]{0,80}$")
+
+
+def _repo_ok(u):
+    return bool(isinstance(u, str) and len(u) <= 300 and _REPO_RE.match(u)
+                and ".." not in u)
+
+
+def _branch_ok(b):
+    return bool(isinstance(b, str) and _BRANCH_RE.match(b)
+                and ".." not in b and not b.endswith(("/", ".lock")))
 
 
 def _known_codes():
@@ -75,7 +106,69 @@ def start(port, hub, mgr, state, telemetry, capture=None, auth=None):
     OPEN_PATHS = {"/", "/index.html", "/favicon.ico",
                   "/api/auth/pin", "/api/auth/login"}
     # Runs code or drops everyone's access: token AND a fresh PIN.
-    PRIVILEGED_PATHS = {"/api/auth/revoke-all"}
+    # These run code on the board. A session token is never enough — see auth.py.
+    PRIVILEGED_PATHS = {"/api/auth/revoke-all", "/api/update/apply",
+                        "/api/update/source"}
+
+    # Same overrides the shell scripts take, so an update can be rehearsed
+    # against a throwaway tree. Unset in normal use.
+    STATE_DIR = os.environ.get("HOTAS_STATE", "/var/lib/hotas-bridge")
+    INSTALL_DIR = os.environ.get("HOTAS_DST") or os.path.abspath(
+        os.path.join(os.path.dirname(_INDEX), "..", ".."))
+
+    def _version():
+        """What install.sh stamped when it last deployed this tree."""
+        try:
+            with open(os.path.join(INSTALL_DIR, "VERSION")) as f:
+                lines = f.read().split("\n")
+            return {"commit": lines[0][:12], "subject": (lines[1] if len(lines) > 1 else "")}
+        except OSError:
+            return {"commit": None, "subject": ""}
+
+    def _source():
+        """Where updates come from. Overridable so you can run your own fork —
+        the shell script reads the same file."""
+        src = {"repo": DEFAULT_REPO,
+               "branch": DEFAULT_BRANCH, "custom": False}
+        try:
+            with open(os.path.join(STATE_DIR, "update.json")) as f:
+                cfg = json.load(f)
+            if isinstance(cfg, dict):
+                if _repo_ok(cfg.get("repo", "")):
+                    src["repo"] = cfg["repo"]
+                if _branch_ok(cfg.get("branch", "")):
+                    src["branch"] = cfg["branch"]
+        except (OSError, ValueError):
+            pass
+        src["custom"] = (src["repo"], src["branch"]) != (DEFAULT_REPO, DEFAULT_BRANCH)
+        src["default_repo"] = DEFAULT_REPO
+        src["default_branch"] = DEFAULT_BRANCH
+        return src
+
+    def _update_log():
+        """Everything this run has reported, including whatever happened while
+        the browser was disconnected for the restart."""
+        try:
+            with open(os.path.join(STATE_DIR, "update.jsonl")) as f:
+                out = []
+                for line in f.read().split("\n")[-200:]:
+                    line = line.strip()
+                    if line:
+                        try:
+                            out.append(json.loads(line))
+                        except ValueError:
+                            pass
+                return out
+        except OSError:
+            return []
+
+    def _unit_active(unit):
+        try:
+            r = subprocess.run(["systemctl", "is-active", unit],
+                               capture_output=True, text=True, timeout=5)
+            return r.stdout.strip() in ("active", "activating")
+        except Exception:
+            return False
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "HOTASBridge/1.0"
@@ -181,6 +274,15 @@ def start(port, hub, mgr, state, telemetry, capture=None, auth=None):
                 if capture is None:
                     return self._err(503, "capture unavailable")
                 return self._send(200, capture.status())
+
+            if self.path == "/api/update":
+                return self._send(200, {
+                    "version": _version(),
+                    "source": _source(),
+                    "running": _unit_active("hotas-update.service")
+                               or _unit_active("hotas-update-check.service"),
+                    "log": _update_log(),
+                })
 
             if self.path == "/api/auth":
                 if auth is None:
@@ -309,6 +411,70 @@ def start(port, hub, mgr, state, telemetry, capture=None, auth=None):
                 if auth is not None:
                     auth.revoke(self._bearer())
                 return self._send(200, {"ok": True})
+
+            if self.path == "/api/update/source":
+                # Pointing the board at a different repository decides what code
+                # it will run, so this sits behind a fresh PIN exactly like
+                # installing does. Send {"default": true} to put it back.
+                try:
+                    body = self._body_json()
+                except ValueError as e:
+                    return self._err(400, f"bad JSON: {e}")
+                if _unit_active("hotas-update.service"):
+                    return self._err(409, "an update is running — try again after it finishes")
+                if body.get("default"):
+                    repo, branch = DEFAULT_REPO, DEFAULT_BRANCH
+                else:
+                    repo = str(body.get("repo", "")).strip()
+                    branch = str(body.get("branch", "")).strip() or DEFAULT_BRANCH
+                    if not _repo_ok(repo):
+                        return self._err(400, "that isn't a repository address I can use — "
+                                              "it must look like https://host/owner/name")
+                    if not _branch_ok(branch):
+                        return self._err(400, "that isn't a usable branch name")
+                try:
+                    os.makedirs(STATE_DIR, exist_ok=True)
+                    tmp = os.path.join(STATE_DIR, "update.json.tmp")
+                    with open(tmp, "w") as f:
+                        json.dump({"repo": repo, "branch": branch}, f)
+                    os.replace(tmp, os.path.join(STATE_DIR, "update.json"))
+                except OSError as e:
+                    return self._err(500, f"could not save it: {e}")
+                return self._send(200, _source())
+
+            if self.path in ("/api/update/check", "/api/update/apply"):
+                unit = ("hotas-update-check.service" if self.path.endswith("check")
+                        else "hotas-update.service")
+                if _unit_active("hotas-update.service") or \
+                   _unit_active("hotas-update-check.service"):
+                    return self._err(409, "an update is already running")
+                if self.path.endswith("apply") and hub.snapshot().get("connected"):
+                    # Restarting mid-match would yank the controls out from
+                    # under you. Make it a deliberate act, not a surprise.
+                    return self._err(409,
+                        "the Xbox is connected — disconnect Oberon Remote first")
+                # Open this run's log HERE, not in the script. `systemctl
+                # start --no-block` returns before the unit has run a line, so
+                # a browser that polls immediately would otherwise read the
+                # PREVIOUS run's log — verdict and all — and believe this run
+                # had already finished.
+                try:
+                    os.makedirs(STATE_DIR, exist_ok=True)
+                    with open(os.path.join(STATE_DIR, "update.jsonl"), "w") as f:
+                        f.write(json.dumps({
+                            "t": int(time.time()), "step": "queued", "state": "run",
+                            "msg": "Starting the updater"}) + "\n")
+                except OSError:
+                    pass
+                try:
+                    # No arguments are constructed from the request. The unit
+                    # file decides entirely what runs, so there is nothing here
+                    # for a caller to influence.
+                    subprocess.run(["systemctl", "start", "--no-block", unit],
+                                   capture_output=True, timeout=10, check=True)
+                except Exception as e:
+                    return self._err(500, f"could not start the updater: {e}")
+                return self._send(200, {"started": unit})
 
             if self.path == "/api/auth/revoke-all":
                 if auth is None:

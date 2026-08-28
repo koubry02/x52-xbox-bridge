@@ -124,7 +124,8 @@ http://<pi-ip>:8088
 ```
 
 - **Status** — which game you are on, whether the Xbox is connected, live input
-  latency and where it goes, and a menu-mode switch.
+  latency and where it goes, a menu-mode switch, and the version the board is
+  running with a one-tap update.
 - **Layouts** — activate, edit, duplicate or delete.
 - **Editor** — bindings as a plain list (`Main trigger → B`), one row per
   control, per mode-dial layer. Inherited rows are drawn dashed so the whole
@@ -168,6 +169,46 @@ Locked out? The PIN is always in `journalctl -u hotas-oberon` as well as on the
 screen, so you never need the display. `--reset-auth` drops every saved
 session; `--no-auth` disables the whole thing for a trusted network or for
 recovery.
+
+### Updating from the web page
+
+The **System** card on the Status tab shows the commit the board is running.
+**Check for updates** asks the repository what is waiting and lists the
+commits; **Install it** deploys them. It needs a fresh PIN, like everything
+else that runs code, and it refuses while the Xbox is connected rather than
+yanking the controls out from under a match.
+
+What happens when you press it, in order:
+
+1. The new code is fetched into `/var/lib/hotas-bridge/src` — never over the
+   running install.
+2. It is **checked before anything is touched**: every Python file must
+   compile, every layout must validate and resolve, and the server must
+   start far enough to print its help. A broken commit is refused here and the
+   board carries on running what it has.
+3. The working install is tarred up, then the new version is installed with
+   the ordinary `install.sh` — same layout backup, same protection for
+   profiles you made.
+4. The service restarts, and the updater waits up to 45 s for it to come back:
+   the unit active, the web app answering, and port 26401 accepting a
+   connection. All three, not just "systemd says it started".
+5. If it does not come back, **the board rolls itself back** from the tarball,
+   restores the unit files, restarts, and tells you it did. You do not have to
+   be there, and you do not need SSH.
+
+Every step is appended to `/var/lib/hotas-bridge/update.jsonl` as it happens,
+which is why the page can show you what went on while it was disconnected for
+the restart — including a rollback. The page reconnects on its own.
+
+The updater runs as its own systemd unit, not as a child of the bridge. It has
+to: systemd's default `KillMode=control-group` would kill an updater spawned by
+the service the moment it restarted it, half way through.
+
+**Running your own fork?** *Change* next to "Updates come from" points the
+board at another repository and branch. That decides what code the board
+executes as root, so it is behind the same fresh-PIN check, the address is
+validated on the way in and re-validated in the shell before `git` ever sees
+it, and one tap puts it back to this project's repository.
 
 ### Mapping a control by pressing it
 
@@ -439,6 +480,18 @@ Check the service: `systemctl status hotas-oberon`.
 **The throttle screen stays blank.** libx52 is not built, or `x52cli` is not on
 PATH. Test with `sudo x52cli mfd 0 "TEST"`; if that errors, run
 `sudo /opt/hotas-bridge/oberon/build_libx52.sh` and replug the stick.
+
+**An update failed.** The board puts the previous version back by itself and
+says so on the page. If both the update and the rollback failed — the only case
+that needs you — the last good install is at
+`/var/lib/hotas-bridge/rollback.tgz`:
+
+```bash
+sudo systemctl stop hotas-oberon
+sudo rm -rf /opt/hotas-bridge
+sudo tar xzf /var/lib/hotas-bridge/rollback.tgz -C /opt
+sudo /opt/hotas-bridge/install.sh oberon
+```
 
 **Watch what is happening:** `journalctl -u hotas-oberon -f` logs layout
 switches, mode switches, menu toggles and connection state.
