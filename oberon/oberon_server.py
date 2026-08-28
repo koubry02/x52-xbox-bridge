@@ -82,6 +82,7 @@ except ImportError:
 
 PORT          = 26401
 WEB_PORT      = 8088
+PING_MAX_MS   = 10_000    # above this it's a gap in polling, not latency
 AXIS_TARGETS  = ("lx", "ly", "rx", "ry", "lt", "rt")
 SPLIT_TARGET  = "split_lt_rt"
 
@@ -190,9 +191,9 @@ class StatusHub:
         self._lock = threading.Lock()
         self._d = {
             "ip": "", "device": "", "connected": False, "ping_ms": None,
-            "menu": False, "layout": None, "layout_display": None,
-            "layout_short": None, "legacy_config": None,
-            "started": time.time(),
+            "ping_at": None, "menu": False, "layout": None,
+            "layout_display": None, "layout_short": None,
+            "legacy_config": None, "started": time.time(),
         }
 
     def set(self, **kw):
@@ -203,6 +204,11 @@ class StatusHub:
         with self._lock:
             d = dict(self._d)
         d["uptime_s"] = int(time.time() - d.pop("started"))
+        at = d.pop("ping_at", None)
+        # Connected but nothing arriving: say so rather than leaving the last
+        # healthy figure on screen looking fine.
+        d["ping_stale"] = bool(d.get("connected") and at is not None
+                               and time.monotonic() - at > 1.5)
         return d
 
 
@@ -214,11 +220,12 @@ class Telemetry:
         self.mfd = mfd
 
     def set_connected(self, on):
-        self.hub.set(connected=on, **({} if on else {"ping_ms": None}))
+        self.hub.set(connected=on,
+                     **({} if on else {"ping_ms": None, "ping_at": None}))
         if self.mfd: self.mfd.set_connected(on)
 
     def set_ping(self, ms):
-        self.hub.set(ping_ms=round(ms, 1))
+        self.hub.set(ping_ms=round(ms, 1), ping_at=time.monotonic())
         if self.mfd: self.mfd.set_ping(ms)
 
     def set_menu(self, on):
@@ -735,9 +742,19 @@ def make_handler(state, verbose, telemetry):
                 now = time.monotonic()
                 dt = (now - last_poll) * 1000.0  # ms since last poll
                 last_poll = now
-                if 0 < dt < 1000:
-                    ema = dt if ema is None else (0.8 * ema + 0.2 * dt)
+                # Anything up to PING_MAX_MS is a real measurement, lag
+                # included — discarding the slow samples was exactly what made
+                # the displayed figure keep reading healthy during a stall.
+                # Beyond that it's a gap, not latency, so restart the average.
+                if 0 < dt <= PING_MAX_MS:
+                    # Rise fast, fall slow: lag should show up on the throttle
+                    # screen the moment it starts, not average itself away.
+                    a = 0.5 if (ema is not None and dt > ema) else 0.2
+                    ema = dt if ema is None else ((1 - a) * ema + a * dt)
                     telemetry.set_ping(ema)
+                elif dt > PING_MAX_MS:
+                    ema = None
+                    telemetry.set_ping(dt)
 
                 axes, g1, g2 = state.snapshot()
                 pkt = build_packet(axes, g1, g2)

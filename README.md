@@ -347,6 +347,17 @@ XBOX:ON    45ms    ← Oberon connected + poll ping
 MENU:ON       AC7  ← menu mode + active game layout
 ```
 
+The ping line tells the truth when the link degrades — that's the point of it:
+
+| Shows | Means |
+|---|---|
+| `45ms` | normal poll cadence |
+| `1.4s` | the Oberon app is polling slowly — real lag |
+| `STALL` | connected, but nothing has arrived for over 1.5s |
+| `waiting` | no Oberon client connected |
+
+The same states appear on the web page's Poll ping card.
+
 - **Button LEDs:** green while flying, amber in menu mode. (The X52 Pro's FIRE
   and THROTTLE LEDs are on/off only — hardware limitation — so those don't
   change color; the A/B/D/E/T LEDs do.)

@@ -14,8 +14,14 @@ Install libx52 on the Pi:
 
 Display layout (3 lines x 16 chars):
     line 0:  <Pi IP address>          e.g. 192.168.1.69
-    line 1:  XBOX:<ON/--> <ping>ms    e.g. XBOX:ON   45ms
+    line 1:  XBOX:<ON/--> <ping>      e.g. XBOX:ON   45ms
+                                           XBOX:ON   1.4s   (laggy)
+                                           XBOX:ON  STALL   (nothing arriving)
     line 2:  MENU:<ON/OFF> <game>     e.g. MENU:ON  AC7
+
+Every line is written padded to the full 16 characters: the MFD does not
+clear a line first, so a shorter string would leave the tail of the previous
+one on screen.
 """
 import shutil
 import subprocess
@@ -31,6 +37,10 @@ _X52CLI = shutil.which("x52cli") or shutil.which("x52output")
 # libx52's CLI addresses the three MFD lines as 0, 1, 2.
 _LINE_LEN = 16
 
+# No poll for this long while connected = the link has stalled, and the last
+# ping figure is no longer telling the truth.
+STALL_AFTER_S = 1.5
+
 
 def available():
     return _X52CLI is not None
@@ -38,23 +48,30 @@ def available():
 
 def _set_line(line_no, text):
     """Write one MFD line. Best-effort; never raises into the caller.
+    Returns True only if the write actually went through.
 
     libx52 CLI syntax is:  x52cli mfd <line> "<text>"
     (line is 0, 1, or 2; text is max 16 chars, extra is discarded).
+
+    The text is padded to the full 16 characters. The MFD does NOT clear a
+    line before writing it, so a short string leaves the tail of whatever was
+    there before — write "45ms" over "1234ms" and the display keeps the stray
+    trailing characters. Padding overwrites the whole line every time.
     """
     if _X52CLI is None:
-        return
-    text = (text or "")[:_LINE_LEN]
+        return False
+    text = (text or "")[:_LINE_LEN].ljust(_LINE_LEN)
     try:
-        subprocess.run(
+        r = subprocess.run(
             [_X52CLI, "mfd", str(line_no), text],
             check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=1.0,
         )
+        return r.returncode == 0
     except Exception:
-        pass  # display is cosmetic; input must never be affected
+        return False   # display is cosmetic; input must never be affected
 
 
 def _cli(*args):
@@ -118,6 +135,7 @@ class MFDStatus:
         self._ip = ip
         self._connected = False
         self._ping_ms = None
+        self._ping_at = None   # when the last poll landed, for stall detection
         self._menu = False
         self._game = ""      # active layout short_name, e.g. "AC7"
         self._last = None  # last rendered tuple, to skip redundant writes
@@ -143,10 +161,12 @@ class MFDStatus:
             self._connected = connected
             if not connected:
                 self._ping_ms = None
+                self._ping_at = None
 
     def set_ping(self, ping_ms):
         with self._lock:
             self._ping_ms = ping_ms
+            self._ping_at = time.monotonic()
 
     def set_menu(self, menu_on):
         with self._lock:
@@ -169,17 +189,34 @@ class MFDStatus:
         self._stop = True
 
     # ---- rendering ----
+    @staticmethod
+    def _fmt_ping(ping_ms, age_s):
+        """The poll cadence, in a form that fits and never lies.
+
+        A stalled link is the important case: if the Oberon app stops polling,
+        the last figure would otherwise sit there reading a healthy 45ms while
+        nothing is arriving at all.
+        """
+        if ping_ms is None:
+            return "--ms"
+        if age_s is not None and age_s > STALL_AFTER_S:
+            return "STALL"
+        if ping_ms >= 1000:
+            return f"{ping_ms / 1000:.1f}s"      # 1.4s reads better than 1400ms
+        return f"{int(ping_ms)}ms"
+
     def _render(self):
         with self._lock:
             ip = self._ip or "no IP"
             if self._connected:
-                p = f"{int(self._ping_ms)}ms" if self._ping_ms is not None else "--ms"
-                l1 = f"XBOX:ON {p:>7}"[:_LINE_LEN]
+                age = None if self._ping_at is None else (time.monotonic() - self._ping_at)
+                l1 = f"XBOX:ON {self._fmt_ping(self._ping_ms, age):>7}"
             else:
                 l1 = "XBOX:--  waiting"
             menu = f"MENU:{'ON' if self._menu else 'OFF'}"
             l2 = f"{menu:<8}{self._game:>8}" if self._game else menu
-        return (ip[:_LINE_LEN], l1, l2)
+        # Pad here too: every line handed to _set_line is a full-width overwrite.
+        return tuple(s[:_LINE_LEN].ljust(_LINE_LEN) for s in (ip, l1, l2))
 
     def _loop(self, hz):
         # Give the device a moment to settle, then refresh on a cadence.
@@ -187,9 +224,12 @@ class MFDStatus:
         while not self._stop:
             lines = self._render()
             if lines != self._last:
-                for i, txt in enumerate(lines):
-                    _set_line(i, txt)
-                self._last = lines
+                # Only remember what we drew if it actually got there. A write
+                # that times out (which is likeliest exactly when the board is
+                # busy) must be retried, or the display keeps a mix of old and
+                # new lines until the text happens to change again.
+                ok = all([_set_line(i, txt) for i, txt in enumerate(lines)])
+                self._last = lines if ok else None
             # LED color reflects state: amber while in menu mode (throttle
             # frozen), green while flying/live.
             with self._lock:
