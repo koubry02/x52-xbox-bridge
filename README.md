@@ -428,10 +428,12 @@ or the poll response. The commit history has some cautionary tales.
 
 ## Licensing
 
-No licence has been declared for this repository, so default copyright applies
-and reuse rights are not granted. If you intend others to use it, adding a
-`LICENSE` file would settle that — MIT is the usual choice for something like
-this.
+The code in this project is licensed under the [MIT license](LICENSE) — use it,
+change it, ship it, sell it, no permission needed. Keep the copyright notice
+and don't expect a warranty; that's the whole of it.
 
 `proxy/`, `receiver/`, `sender/` and `overlays/` belong to an alternative
 USB-hardware mode and are not used by the Oberon setup described here.
+[usb-proxy](https://github.com/AristoChen/usb-proxy), which that mode builds
+against, is cloned at install time and carries its own licence — nothing from
+it is included in this repository.
