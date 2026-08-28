@@ -574,6 +574,14 @@ def evdev_reader(dev, mgr, state, telemetry, verbose=False, capture=None):
     _last_bri = -1
     _last_led_bri = -1
     was_capturing = False
+    # An idling X52 dithers on its axes, so events arrive continuously even
+    # untouched. Buttons can only change on a key event, a hat move, or an
+    # axis crossing a button threshold — so cache them and rebuild on demand,
+    # and skip publishing entirely when nothing actually moved.
+    btn_dirty = True
+    g1 = g2 = 0
+    trig_hold = {"lt": False, "rt": False}
+    pub = None                  # last published (lx ly rx ry lt rt g1 g2)
 
     def reset_local():
         nonlocal axes, pressed, hat, axis_st, mode
@@ -591,6 +599,8 @@ def evdev_reader(dev, mgr, state, telemetry, verbose=False, capture=None):
                 if mgr.m is not m:              # layout switched (button or web)
                     m = mgr.m
                     reset_local()
+                    btn_dirty = True
+                    pub = None
                     state.update(axes, 0, 0)    # publish neutral immediately
 
                 if capture is not None:
@@ -618,8 +628,10 @@ def evdev_reader(dev, mgr, state, telemetry, verbose=False, capture=None):
                             axes[tgt] = v
                         if ev.code in m.axis_btns:
                             _, _, thr = m.axis_btns[ev.code]
-                            axis_st[ev.code] = (-1 if v < -thr else
-                                                 1 if v > thr else 0)
+                            s = -1 if v < -thr else 1 if v > thr else 0
+                            if axis_st.get(ev.code) != s:
+                                axis_st[ev.code] = s
+                                btn_dirty = True
                     elif m.brightness and ev.code == m.brightness[0]:
                         # Throttle rotary -> live MFD brightness 0..128.
                         info = m.brightness[1]
@@ -637,9 +649,13 @@ def evdev_reader(dev, mgr, state, telemetry, verbose=False, capture=None):
                             _last_led_bri = lvl
                             telemetry.set_led_brightness(lvl)
                     elif m.hat_dpad and ev.code == ecodes.ABS_HAT0X:
-                        hat[0] = ev.value
+                        if hat[0] != ev.value:
+                            hat[0] = ev.value
+                            btn_dirty = True
                     elif m.hat_dpad and ev.code == ecodes.ABS_HAT0Y:
-                        hat[1] = ev.value
+                        if hat[1] != ev.value:
+                            hat[1] = ev.value
+                            btn_dirty = True
 
                 elif ev.type == ecodes.EV_KEY:
                     if m.suspend_code is not None and ev.code == m.suspend_code and ev.value == 1:
@@ -654,6 +670,7 @@ def evdev_reader(dev, mgr, state, telemetry, verbose=False, capture=None):
                             # inputs (fire, ping, etc.). They re-register on the
                             # next real press.
                             pressed.clear()
+                            btn_dirty = True
                     elif m.switch_code is not None and ev.code == m.switch_code and ev.value == 1:
                         mgr.cycle()     # picked up at the top of the next event
                         continue
@@ -661,61 +678,109 @@ def evdev_reader(dev, mgr, state, telemetry, verbose=False, capture=None):
                         new_mode = m.mode_sel[ev.code]
                         if new_mode != mode:
                             mode = new_mode
+                            btn_dirty = True
                             print(f"[mode] switched to M{mode}", flush=True)
                     elif ev.value:
-                        pressed.add(ev.code)
-                    else:
+                        if ev.code not in pressed:
+                            pressed.add(ev.code)
+                            btn_dirty = True
+                    elif ev.code in pressed:
                         pressed.discard(ev.code)
+                        btn_dirty = True
 
-                # Rebuild button bytes every event. Buttons stay live while
-                # suspended so you can still select/back in menus; only the axes
-                # freeze. The pressed.clear() on resume (above) prevents a held
-                # button from flushing as a phantom input when axes come back.
-                g1, g2 = 0, 0
-                trig_hold = {"lt": False, "rt": False}
+                # Rebuild the button bytes only when something could have
+                # changed them. Buttons stay live while suspended so you can
+                # still select/back in menus; only the axes freeze. The
+                # pressed.clear() on resume (above) prevents a held button from
+                # flushing as a phantom input when axes come back.
+                if btn_dirty:
+                    btn_dirty = False
+                    g1, g2 = 0, 0
+                    trig_hold = {"lt": False, "rt": False}
 
-                def press(resolved):
-                    nonlocal g1, g2
-                    bits, trigs = resolved
-                    for grp, mask in bits:
-                        if grp == 1: g1 |= mask
-                        else:        g2 |= mask
-                    for t in trigs:
-                        trig_hold[t] = True
+                    def press(resolved):
+                        nonlocal g1, g2
+                        bits, trigs = resolved
+                        for grp, mask in bits:
+                            if grp == 1: g1 |= mask
+                            else:        g2 |= mask
+                        for t in trigs:
+                            trig_hold[t] = True
 
-                for code in pressed:
-                    resolved = m.button_cfg.get((mode, code))
-                    if resolved:
-                        press(resolved)
+                    for code in pressed:
+                        resolved = m.button_cfg.get((mode, code))
+                        if resolved:
+                            press(resolved)
 
-                # Axis-driven buttons (e.g. twist past the threshold = LB/RB)
-                for code, st in axis_st.items():
-                    if st:
-                        low, high, _ = m.axis_btns[code]
-                        press(low if st < 0 else high)
+                    # Axis-driven buttons (e.g. twist past the threshold = LB/RB)
+                    for code, st in axis_st.items():
+                        if st:
+                            low, high, _ = m.axis_btns[code]
+                            press(low if st < 0 else high)
 
-                # POV hats report -1/0/+1. Require a full ±1 before emitting a
-                # d-pad direction so a hat resting slightly off-neutral can
-                # never hold a direction (which would block menu navigation).
-                if hat[0] <= -1: g2 |= OBERON_BTNS["dpad_left"][1]
-                if hat[0] >= 1:  g2 |= OBERON_BTNS["dpad_right"][1]
-                if hat[1] <= -1: g2 |= OBERON_BTNS["dpad_up"][1]
-                if hat[1] >= 1:  g2 |= OBERON_BTNS["dpad_down"][1]
+                    # POV hats report -1/0/+1. Require a full ±1 before emitting
+                    # a d-pad direction so a hat resting slightly off-neutral
+                    # can never hold one (which would block menu navigation).
+                    if hat[0] <= -1: g2 |= OBERON_BTNS["dpad_left"][1]
+                    if hat[0] >= 1:  g2 |= OBERON_BTNS["dpad_right"][1]
+                    if hat[1] <= -1: g2 |= OBERON_BTNS["dpad_up"][1]
+                    if hat[1] >= 1:  g2 |= OBERON_BTNS["dpad_down"][1]
 
                 # The throttle freeze is applied at poll time inside
                 # HOTASState.snapshot() (so it holds even when the parked
                 # throttle sends no events). Here we just publish live values.
-                ax = dict(axes)
-                if trig_hold["lt"]: ax["lt"] = 1.0
-                if trig_hold["rt"]: ax["rt"] = 1.0
-
-                state.update(ax, g1, g2)
+                lt = 1.0 if trig_hold["lt"] else axes["lt"]
+                rt = 1.0 if trig_hold["rt"] else axes["rt"]
+                key = (axes["lx"], axes["ly"], axes["rx"], axes["ry"], lt, rt, g1, g2)
+                # Axis dither that shapes back to the same value reaches here on
+                # every event and changes nothing. Don't take the lock for it.
+                if key != pub:
+                    pub = key
+                    ax = dict(axes)
+                    ax["lt"] = lt
+                    ax["rt"] = rt
+                    state.update(ax, g1, g2)
 
         except OSError:
             time.sleep(1)  # device unplugged; keep trying
 
 
 # ─── WebSocket server ─────────────────────────────────────────────────────────
+
+# DSCP EF (Expedited Forwarding, 46) in the TOS byte. On WiFi this is what
+# gets our frames out of the best-effort queue and into a high-priority WMM
+# access category, which is where the latency actually lives — the payload
+# itself is tiny and the CPU cost of building it is a rounding error.
+_DSCP_EF   = 46 << 2          # 0xB8
+# Linux uses the socket priority as the 802.1d user priority, and mac80211
+# maps UP 6 to AC_VO. This is the lever for frames leaving the Pi; the DSCP
+# byte above is what the AP and anything downstream will look at.
+_SO_PRIO_VO = 6
+
+
+def tune_socket(websocket):
+    """Mark this connection as latency-sensitive. Entirely best-effort: every
+    one of these is an optimisation, none of them is required to work."""
+    try:
+        sock = websocket.transport.get_extra_info("socket")
+    except Exception:
+        sock = None
+    if sock is None:
+        return
+    # TCP_NODELAY is already set by asyncio, but say so explicitly rather than
+    # depend on it: a 100-byte reply must never wait for a coalescing partner.
+    for level, opt, val, what in (
+        (socket.IPPROTO_TCP, getattr(socket, "TCP_NODELAY", None), 1, "nodelay"),
+        (socket.IPPROTO_IP,  getattr(socket, "IP_TOS", None), _DSCP_EF, "dscp"),
+        (socket.SOL_SOCKET,  getattr(socket, "SO_PRIORITY", None), _SO_PRIO_VO, "priority"),
+    ):
+        if opt is None:
+            continue
+        try:
+            sock.setsockopt(level, opt, val)
+        except OSError:
+            pass    # SO_PRIORITY needs privileges; IP_TOS is v4-only. Fine.
+
 
 def make_handler(state, verbose, telemetry):
     hostname = socket.gethostname()
@@ -724,6 +789,7 @@ def make_handler(state, verbose, telemetry):
     async def handler(websocket):
         addr = websocket.remote_address
         print(f"[oberon] connected from {addr[0]}")
+        tune_socket(websocket)
         await websocket.send(handshake)
         telemetry.set_connected(True)
 
@@ -911,7 +977,15 @@ def main():
 
     async def run():
         handler = make_handler(state, args.verbose, telemetry)
-        async with ws_serve(handler, "0.0.0.0", args.port):
+        # compression=None: the state buffer is ~90% zeros so deflate squeezes
+        # it to a few bytes, but 9 bytes and 100 bytes occupy the same single
+        # WiFi frame — identical airtime. All it buys is a stateful compress
+        # step per poll on the critical path.
+        # ping_interval=None: the client polls at a few hundred hertz, so the
+        # link's liveness is never in question, and a client that doesn't
+        # answer WebSocket pings would otherwise be dropped after 20s.
+        async with ws_serve(handler, "0.0.0.0", args.port,
+                            compression=None, ping_interval=None):
             print(f"[oberon] WebSocket server on port {args.port}")
             print(f"[oberon] Board IP : {local_ip}")
             print(f"[oberon] On Xbox  : open Oberon Remote -> enter {local_ip} -> Connect")

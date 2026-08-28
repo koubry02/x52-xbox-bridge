@@ -1487,7 +1487,13 @@ window.addEventListener("beforeunload", e => { if (dirty) { e.preventDefault(); 
 
 /* ═══ go ════════════════════════════════════════════════════════════════ */
 poll();
-setInterval(() => { if (!scrim.classList.contains("on")) poll(); }, 2500);
+// Don't poll a tab nobody is looking at. Every status request costs the Pi a
+// little CPU on the same interpreter that's feeding the Xbox, and a phone left
+// on this page in a pocket would otherwise keep asking all match.
+setInterval(() => {
+  if (!scrim.classList.contains("on") && !document.hidden) poll();
+}, 2500);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) poll(); });
 </script>
 </body>
 </html>

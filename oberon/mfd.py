@@ -138,7 +138,6 @@ class MFDStatus:
         self._ping_at = None   # when the last poll landed, for stall detection
         self._menu = False
         self._game = ""      # active layout short_name, e.g. "AC7"
-        self._last = None  # last rendered tuple, to skip redundant writes
         self._last_led = None
         self._stop = False
         self._enabled = available()
@@ -221,15 +220,17 @@ class MFDStatus:
     def _loop(self, hz):
         # Give the device a moment to settle, then refresh on a cadence.
         period = 1.0 / max(0.5, hz)
+        drawn = [None, None, None]      # what's actually on each line
         while not self._stop:
             lines = self._render()
-            if lines != self._last:
-                # Only remember what we drew if it actually got there. A write
-                # that times out (which is likeliest exactly when the board is
-                # busy) must be retried, or the display keeps a mix of old and
-                # new lines until the text happens to change again.
-                ok = all([_set_line(i, txt) for i, txt in enumerate(lines)])
-                self._last = lines if ok else None
+            # Write only the lines that changed. Every _set_line is a process
+            # spawn plus a USB round-trip — by far the most expensive thing
+            # this program does — and in practice only the ping line moves.
+            # A line that fails to write stays None so the next tick retries
+            # it, instead of leaving old and new text mixed on the display.
+            for i, txt in enumerate(lines):
+                if txt != drawn[i]:
+                    drawn[i] = txt if _set_line(i, txt) else None
             # LED color reflects state: amber while in menu mode (throttle
             # frozen), green while flying/live.
             with self._lock:

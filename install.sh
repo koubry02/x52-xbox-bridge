@@ -58,7 +58,7 @@ case "$ROLE" in
     echo "=== Mode: Oberon (single Pi) ==="
     echo "--- Installing Python deps ---"
     apt-get update -qq
-    apt-get install -y -qq python3-evdev
+    apt-get install -y -qq python3-evdev iw
 
     # websockets: prefer apt package (noble has python3-websockets),
     # fall back to pip if the apt version is too old (need >= 10)
@@ -120,6 +120,14 @@ case "$ROLE" in
         fi
     fi
 
+    # ---- WiFi latency ----
+    # Power save parks the radio between beacons, which costs a browser
+    # nothing and costs a flight stick 100-200ms. Everything else in this
+    # project runs in well under a millisecond, so this is the one knob that
+    # actually decides how the link feels.
+    echo "--- Tuning the WiFi link ---"
+    bash "$DST/tools/wifi_tune.sh" || echo "  (skipped; run tools/wifi_tune.sh by hand)"
+
     svc_install hotas-oberon.service
     systemctl daemon-reload
     systemctl enable --now hotas-oberon.service
@@ -133,6 +141,7 @@ case "$ROLE" in
     echo "Switch games : press the layout button on the throttle (T2 / BTN_BASE4)"
     echo "               — the active game shows on the throttle screen."
     echo "Web app      : http://$IP:8088   (status + layout editor, LAN only)"
+    echo "Link check   : sudo $DST/tools/wifi_tune.sh --status"
     echo ""
     echo "Next step on Xbox: open Oberon Remote, enter $IP, press Connect."
     echo "Check status: journalctl -u hotas-oberon -f"

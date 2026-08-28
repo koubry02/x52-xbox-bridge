@@ -28,6 +28,8 @@ hotas-bridge/
 │   ├── ac7.json                   Ace Combat 7: Skies Unknown
 │   ├── bf6.json                   Battlefield 6 (aircraft)
 │   └── msfs2024.json              MS Flight Simulator 2024
+├── tools/
+│   └── wifi_tune.sh               kills WiFi power save (the latency fix)
 └── oberon/
     ├── oberon_server.py           the server: reads X52, talks to Oberon
     ├── layouts.py                 layout loading, inheritance, validation
@@ -39,8 +41,8 @@ hotas-bridge/
     └── hotas-oberon.service       starts the server on boot (menu mode)
 ```
 
-The `proxy/`, `receiver/`, `sender/` and `tools/` folders belong to an
-alternative USB-hardware mode and aren't needed for Oberon.
+The `proxy/`, `receiver/` and `sender/` folders belong to an alternative
+USB-hardware mode and aren't needed for Oberon.
 
 ---
 
@@ -317,6 +319,49 @@ M2 a d-pad/systems layer, M3 menus.
 
 ---
 
+## Latency — where it actually comes from
+
+Short version: **it's the WiFi, not the software.** Measured on the input path,
+per poll at 250 Hz:
+
+| | cost |
+|---|---|
+| build the controller packet | ~18 µs |
+| read the shared state | ~3 µs |
+| **everything the bridge does** | **well under 1 ms** |
+| WiFi round trip, clean 5 GHz | 1–3 ms |
+| **WiFi with power save on** | **100–200 ms spikes** |
+
+Power save parks the radio between beacons. That's invisible on a web page and
+ruinous for a flight stick, and it's usually **on by default**. The installer
+now turns it off and keeps it off across reboots and reconnects. To check or
+re-apply by hand:
+
+```bash
+sudo /opt/hotas-bridge/tools/wifi_tune.sh --status   # what's the link doing?
+sudo /opt/hotas-bridge/tools/wifi_tune.sh            # fix it, and on every boot
+```
+
+After that, in the order that actually helps:
+
+1. **Put the Pi on 5 GHz**, on a channel your neighbours aren't using. 2.4 GHz
+   shares the air with every doorbell and microwave nearby.
+2. **Or wire the Pi to the router.** The Xbox can stay wireless — removing one
+   of the two radios is most of the win.
+3. **Give the Pi a static lease**, so a DHCP renewal can't land mid-match.
+
+You can see all of this working: the throttle screen and the web page read real
+milliseconds, then `1.4s`, then `STALL` as the link degrades. Change one thing
+at a time and watch it.
+
+**Bandwidth is a non-issue** — the whole link runs at about 0.4 Mbps. There is
+nothing to save there, so the bridge spends its effort on *consistency*
+instead: packets are marked DSCP EF and priority 6 so WiFi puts them in a
+high-priority queue rather than behind someone's download, and WebSocket
+compression is off because 9 bytes and 100 bytes occupy the same radio frame.
+
+---
+
 ## Menu mode (why the throttle doesn't wreck menus)
 
 A throttle rests wherever you leave it — it never re-centers. Mapped to a stick
@@ -440,6 +485,11 @@ exact URL. Port 8088 by default.
 
 **Xbox won't connect.** Pi and Xbox must share a network. Re-enter the Pi's IP
 in Oberon. Check the server: `systemctl status hotas-oberon`.
+
+**Input feels laggy or stutters.** Check the link first — it's almost always
+WiFi power save: `sudo /opt/hotas-bridge/tools/wifi_tune.sh --status`. If it
+says power save is on, run the same script without `--status`. See
+[Latency](#latency--where-it-actually-comes-from) for what to try next.
 
 **Watch what's happening live:** `journalctl -u hotas-oberon -f` shows layout
 switches, mode switches, menu toggles, and connection state. Add `--verbose` to

@@ -221,24 +221,13 @@ def start(port, hub, mgr, state, telemetry, capture=None):
 
         # ---- helpers ----
         def _summaries(self):
-            out = []
             if mgr.layouts_dir is None:
-                return out
+                return []
             active = mgr.m.name if mgr.m else None
-            for n in layouts_mod.cycle_order(mgr.layouts_dir):
-                try:
-                    raw = layouts_mod.load_raw(mgr.layouts_dir, n)
-                except (OSError, json.JSONDecodeError):
-                    raw = {}
-                out.append({
-                    "name": n,
-                    "display_name": raw.get("display_name", n),
-                    "short_name": raw.get("short_name", n.upper()[:8]),
-                    "inherits": raw.get("inherits"),
-                    "order": raw.get("order", 50),
-                    "active": n == active,
-                })
-            return out
+            # Cached against file mtimes in layouts.py — this used to reparse
+            # every layout twice on every status poll.
+            return [dict(e, active=e["name"] == active)
+                    for e in layouts_mod.summaries(mgr.layouts_dir)]
 
     httpd = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     t = threading.Thread(target=httpd.serve_forever, daemon=True)

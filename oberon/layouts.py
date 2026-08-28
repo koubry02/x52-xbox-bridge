@@ -41,6 +41,7 @@ press several at once (e.g. ["ls", "rs"] = AC7 flares on one button).
 import json
 import os
 import re
+import threading
 
 AXIS_TARGETS   = ("lx", "ly", "rx", "ry", "lt", "rt")
 SPLIT_TARGET   = "split_lt_rt"
@@ -117,18 +118,65 @@ def resolve(layouts_dir, name, _seen=None):
     return merged
 
 
-def cycle_order(layouts_dir):
-    """Layout names in switch-button cycle order: by "order" key, then name."""
+# ── summary cache ────────────────────────────────────────────────────────────
+# The status endpoint and the switch button both want "every layout's name and
+# order", several times a second between them. Parsing every file each time is
+# pure waste on an SD card, and it happens on the same interpreter as the input
+# reader — so the cost lands as a latency bump, not just CPU. Cache it against
+# the files' mtimes: a stat per file is ~20x cheaper than an open-and-parse,
+# and any edit (from the web app or by hand) invalidates it for free.
+_cache_lock = threading.Lock()
+_cache = {"sig": None, "data": None}
+
+
+def _signature(layouts_dir):
+    out = []
+    try:
+        names = sorted(os.listdir(layouts_dir))
+    except OSError:
+        return ()
+    for fn in names:
+        if fn.endswith(".json") and not fn.startswith((".", "_")):
+            try:
+                st = os.stat(os.path.join(layouts_dir, fn))
+            except OSError:
+                continue
+            out.append((fn, st.st_mtime_ns, st.st_size))
+    return tuple(out)
+
+
+def summaries(layouts_dir):
+    """Every layout's headline fields, in cycle order. Cached on file mtimes."""
+    sig = _signature(layouts_dir)
+    with _cache_lock:
+        if _cache["sig"] == sig and _cache["data"] is not None:
+            return _cache["data"]
+
     entries = []
-    for name in list_layouts(layouts_dir):
+    for fn, _, _ in sig:
+        name = fn[:-5]
         try:
             raw = load_raw(layouts_dir, name)
-            order = raw.get("order", 50)
         except (OSError, ValueError):
-            order = 50
-        entries.append((order if isinstance(order, (int, float)) else 50, name))
-    entries.sort()
-    return [n for _, n in entries]
+            raw = {}
+        order = raw.get("order", 50)
+        entries.append({
+            "name": name,
+            "display_name": raw.get("display_name", name),
+            "short_name": raw.get("short_name", name.upper()[:8]),
+            "inherits": raw.get("inherits"),
+            "order": order if isinstance(order, (int, float)) else 50,
+        })
+    entries.sort(key=lambda e: (e["order"], e["name"]))
+
+    with _cache_lock:
+        _cache["sig"], _cache["data"] = sig, entries
+    return entries
+
+
+def cycle_order(layouts_dir):
+    """Layout names in switch-button cycle order: by "order" key, then name."""
+    return [e["name"] for e in summaries(layouts_dir)]
 
 
 def _valid_button_target(t):
