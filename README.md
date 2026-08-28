@@ -133,9 +133,41 @@ http://<pi-ip>:8088
 Saving the layout that is currently active re-applies it live — no restart, no
 reconnect. Nothing is written until it validates.
 
-> **No password.** Anyone on your LAN can edit layouts, toggle menu mode and
-> briefly pause the controller output. That is deliberate — it is a tool for
-> your own network. Do not port-forward it. `--web-port 0` turns it off.
+### Pairing, and why it works that way
+
+The first time a browser opens the page it asks for a **6-digit PIN**, shown on
+the throttle screen and printed to the log:
+
+```
+  PIN 482917       ← the throttle screen, while a PIN is waiting
+ enter in browser
+MENU:ON      AC7   ← menu state is never hidden by it
+```
+
+Reading that PIN proves you are either standing at the stick or already on the
+box — that is the whole trust anchor. It lasts 60 seconds, five wrong guesses
+burn it, and it disappears from the screen the moment it is used, expires, or
+is burned. Your browser then keeps a token, so you only do this once per device.
+
+**Anything that runs code needs the PIN again**, even with a valid token. This
+is plaintext HTTP on your LAN: on WPA2 anyone with the WiFi password can sniff
+a token, and bearer tokens are replayable by design. A token is fine for
+editing a layout; it must never be enough to make the board fetch and execute
+code as root. Same reason `sudo` asks again.
+
+Tokens travel in the `Authorization` header, never a cookie — a cookie would
+let any website you visit act on your board, since your browser can reach this
+port. Cross-origin requests are refused outright, and so is a `Host` header
+that is a name rather than an address, which is what DNS rebinding needs.
+Tokens are stored on disk hashed, so a leaked `sessions.json` yields nothing.
+
+**Your controller is never gated.** Revoke every session, lock yourself out
+entirely, and the stick keeps flying — auth guards the web app only.
+
+Locked out? The PIN is always in `journalctl -u hotas-oberon` as well as on the
+screen, so you never need the display. `--reset-auth` drops every saved
+session; `--no-auth` disables the whole thing for a trusted network or for
+recovery.
 
 ### Mapping a control by pressing it
 
@@ -371,6 +403,8 @@ or just press it in the web editor.
 | `--dscp` | off | Mark packets DSCP EF / priority 6 to claim a high-priority WiFi queue. Helps on some APs, hurts on others — measure it |
 | `--list` / `--probe` | — | List devices / print live event names |
 | `--verbose` | off | Log state on every poll. Do not leave it on while playing |
+| `--no-auth` | off | Serve the web app with no PIN. Trusted networks and lockout recovery only |
+| `--reset-auth` | off | Drop every saved web session at startup |
 
 ## Troubleshooting
 
@@ -393,6 +427,11 @@ deliberately not guessed.
 `layout_switch_button`, or the name does not match your unit. It is read from
 the *active* layout, so if you switch into one that lacks it you will need the
 web page to get back.
+
+**Locked out of the web app.** The PIN is printed to the log as well as the
+throttle screen: `journalctl -u hotas-oberon | grep PIN`, then request a fresh
+one from the page. If you cannot reach the log either, add `--no-auth` to the
+service's `ExecStart` temporarily.
 
 **Xbox will not connect.** Pi and Xbox must share a network. Re-enter the IP.
 Check the service: `systemctl status hotas-oberon`.

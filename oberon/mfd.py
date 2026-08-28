@@ -154,6 +154,11 @@ class MFDStatus:
         # forked a process and waited on USB *in the thread reading the stick*.
         self._want_bri = None
         self._want_led_bri = None
+        # A pairing PIN, shown on lines 0-1 while one is waiting. Line 2 keeps
+        # the menu/game state — you must never lose sight of whether the
+        # throttle is frozen just because someone opened the web page.
+        self._pin = None
+        self._pin_until = 0.0
         # Set by anything the user is waiting to see, so the refresh loop
         # redraws now instead of on its next tick.
         self._wake = threading.Event()
@@ -193,6 +198,24 @@ class MFDStatus:
 
     def set_ping(self, ping_ms):            # callers that only have one figure
         self.set_latency(ping_ms)
+
+    def set_pin(self, pin, seconds=0):
+        """Show a pairing PIN, or None to put the normal display back.
+
+        The expiry is held here so the display drops it on its own: a PIN that
+        times out while nobody is looking must not stay on the glass. The
+        refresh loop is already ticking, so this costs no extra writes.
+
+        Deliberately no countdown on the glass: a ticking second would rewrite
+        the line once a second forever, and every write is a process spawn plus
+        a USB round-trip. The browser renders the countdown; it knows the
+        expiry and costs nothing to update."""
+        with self._lock:
+            changed = self._pin != pin
+            self._pin = pin
+            self._pin_until = (time.monotonic() + seconds) if pin else 0.0
+        if changed:
+            self._wake.set()
 
     def set_menu(self, menu_on):
         with self._lock:
@@ -278,6 +301,12 @@ class MFDStatus:
                 l1 = "XBOX:--  waiting"
             menu = f"MENU:{'ON' if self._menu else 'OFF'}"
             l2 = f"{menu:<8}{self._game:>8}" if self._game else menu
+            if self._pin and time.monotonic() >= self._pin_until:
+                self._pin = None            # expired unseen; back to normal
+            if self._pin:
+                # Two writes when it appears, two when it clears. That's all.
+                l0 = f"PIN {self._pin}".center(_LINE_LEN)
+                l1 = "enter in browser"
             ip = l0
         # Pad here too: every line handed to _set_line is a full-width overwrite.
         return tuple(s[:_LINE_LEN].ljust(_LINE_LEN) for s in (ip, l1, l2))

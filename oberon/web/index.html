@@ -321,6 +321,15 @@ h2.sec:first-child { margin-top: 2px; }
 .chip[aria-pressed="true"]::after { content: "✓"; color: var(--txt); font-size: 12px; }
 .chip .lbl2 { color: var(--txt-3); font-weight: 500; font-size: 11.5px; }
 
+/* ── login gate ─────────────────────────────────────────────────────────── */
+.gate { position: fixed; inset: 0; z-index: 80; background: var(--bg);
+        display: none; align-items: center; justify-content: center; padding: 24px; }
+.gate.on { display: flex; }
+.gatebox { width: 100%; max-width: 340px; }
+.gatebox h3 { margin: 0 0 6px; font-size: 20px; font-weight: 640;
+              letter-spacing: -.02em; text-align: center; }
+.gatebox .lead { text-align: center; }
+
 /* ── sheet ──────────────────────────────────────────────────────────────── */
 .scrim {
   position: fixed; inset: 0; z-index: 60; background: rgba(8,6,5,.74);
@@ -655,6 +664,23 @@ textarea { min-height: 300px; resize: vertical; font-family: ui-monospace, monos
   <button class="btn primary" id="sb-save">Save changes</button>
 </div>
 
+<div class="gate" id="gate">
+  <div class="gatebox">
+    <div class="brand" style="justify-content:center;margin-bottom:22px">HOTAS Bridge <span class="mark">X52</span></div>
+    <h3 id="g-title">Pair this browser</h3>
+    <p class="lead" id="g-lead">A PIN will appear on your throttle screen. If
+      you have no screen, it's in the log: <code>journalctl -u hotas-oberon</code></p>
+    <div id="g-step1"><button class="btn primary block" id="g-ask">Show me a PIN</button></div>
+    <div id="g-step2" style="display:none">
+      <div class="field"><input type="text" id="g-pin" inputmode="numeric"
+        autocomplete="one-time-code" maxlength="6" placeholder="000000"
+        style="text-align:center;font:600 30px/1 ui-monospace,monospace;letter-spacing:.28em"></div>
+      <div class="btnrow"><button class="btn primary block" id="g-go">Unlock</button></div>
+      <p class="note" style="text-align:center" id="g-count"></p>
+    </div>
+    <div class="err" id="g-err" style="display:none"></div>
+  </div>
+</div>
 <div class="scrim" id="scrim"><div class="sheet" id="sheet"></div></div>
 <div id="toast"></div>
 
@@ -736,12 +762,98 @@ const glyphs = (t, big) => {
 };
 
 /* ═══ api ═══════════════════════════════════════════════════════════════ */
+/* The token lives in localStorage and travels in the Authorization header —
+   never a cookie, so a hostile page you happen to visit can't ride along with
+   your credentials. A 401 drops us back to the PIN gate. */
+let token = null;
+try { token = localStorage.getItem("hb.token"); } catch (e) {}
+function setToken(t) {
+  token = t;
+  try { t ? localStorage.setItem("hb.token", t) : localStorage.removeItem("hb.token"); }
+  catch (e) {}
+}
 const api = async (p, o) => {
+  o = Object.assign({}, o);
+  o.headers = Object.assign({}, o.headers,
+    token ? { Authorization: "Bearer " + token } : {});
   const r = await fetch(p, o);
   const j = await r.json().catch(() => ({}));
+  // A 401 from the login call means "wrong PIN", not "your session died" —
+  // re-gating there would wipe the PIN out from under whoever is typing it.
+  if (r.status === 401 && !p.startsWith("/api/auth/")) {
+    setToken(null); showGate(); throw new Error(j.error || "locked");
+  }
+  if (r.status === 403 && j.error === "stepup") { const e = new Error("stepup"); e.stepup = true; throw e; }
   if (!r.ok) throw new Error(j.problems ? j.problems.join("\n") : (j.error || `HTTP ${r.status}`));
   return j;
 };
+
+/* ── the PIN gate ─────────────────────────────────────────────────────── */
+let gateTimer = null, gateStepUp = false;
+function showGate(stepUp) {
+  gateStepUp = !!stepUp;
+  $("#g-title").textContent = stepUp ? "Confirm it's you" : "Pair this browser";
+  $("#g-lead").innerHTML = stepUp
+    ? "This one runs code on the board, so it needs a PIN from the throttle "
+      + "screen — a saved login isn't enough on its own."
+    : "A PIN will appear on your throttle screen. If you have no screen, it's "
+      + "in the log: <code>journalctl -u hotas-oberon</code>";
+  $("#g-err").style.display = "none";
+  $("#g-step1").style.display = "";
+  $("#g-step2").style.display = "none";
+  $("#gate").classList.add("on");
+}
+function hideGate() {
+  $("#gate").classList.remove("on");
+  clearInterval(gateTimer); gateTimer = null;
+}
+function gateErr(m) {
+  const e = $("#g-err"); e.style.display = ""; e.textContent = m;
+}
+$("#g-ask").onclick = async () => {
+  $("#g-err").style.display = "none";
+  try {
+    const j = await api("/api/auth/pin", { method: "POST" });
+    $("#g-step1").style.display = "none";
+    $("#g-step2").style.display = "";
+    $("#g-pin").value = ""; $("#g-pin").focus();
+    let left = j.seconds;
+    const tick = () => {
+      $("#g-count").textContent = left > 0
+        ? `expires in ${left}s` : "expired — ask for another";
+      if (left-- <= 0) {
+        clearInterval(gateTimer); gateTimer = null;
+        $("#g-step1").style.display = ""; $("#g-step2").style.display = "none";
+      }
+    };
+    tick(); clearInterval(gateTimer); gateTimer = setInterval(tick, 1000);
+  } catch (e) { gateErr(e.message); }
+};
+async function submitPin() {
+  const pin = $("#g-pin").value.trim();
+  if (!/^[0-9]{6}$/.test(pin)) return gateErr("Six digits.");
+  try {
+    const j = await api("/api/auth/login",
+      { method: "POST", body: JSON.stringify({ pin }) });
+    setToken(j.token);
+    hideGate();
+    toast(gateStepUp ? "Confirmed" : "Paired");
+    if (gateStepUp && pendingPrivileged) { const f = pendingPrivileged; pendingPrivileged = null; f(); }
+    else poll();
+  } catch (e) { gateErr(e.message); $("#g-pin").select(); }
+}
+$("#g-go").onclick = submitPin;
+$("#g-pin").onkeydown = e => { if (e.key === "Enter") submitPin(); };
+
+/* Retries a privileged call once the fresh PIN lands. */
+let pendingPrivileged = null;
+async function privileged(fn) {
+  try { await fn(); }
+  catch (e) {
+    if (e.stepup) { pendingPrivileged = () => privileged(fn); showGate(true); }
+    else toast(e.message, true);
+  }
+}
 let toastT;
 function toast(msg, bad) {
   const t = $("#toast");
@@ -776,7 +888,11 @@ function setDirty(v) {
 async function poll() {
   let s;
   try { s = await api("/api/status"); }
-  catch { $("#tb-ip").textContent = "bridge offline"; $("#tb-dot").className = "dot"; return; }
+  catch (e) {
+    if (e.message === "locked") return;      // the gate is already up
+    $("#tb-ip").textContent = "bridge offline"; $("#tb-dot").className = "dot";
+    return;
+  }
   status = s; layouts = s.layouts || [];
 
   $("#tb-ip").textContent = s.ip || "—";
@@ -1561,7 +1677,18 @@ $("#sb-revert").onclick = () => confirmSheet(
 window.addEventListener("beforeunload", e => { if (dirty) { e.preventDefault(); e.returnValue = ""; } });
 
 /* ═══ go ════════════════════════════════════════════════════════════════ */
-poll();
+/* Ask the board whether it wants a PIN at all before gating anyone. A board
+   started with --no-auth has no PIN to give — showing the gate there would
+   lock the user out of the very escape hatch that flag exists to provide.
+   401 here means "auth is on and you aren't in"; 200 means carry on. */
+(async () => {
+  try {
+    const r = await fetch("/api/auth",
+      { headers: token ? { Authorization: "Bearer " + token } : {} });
+    if (r.status === 401) { setToken(null); showGate(); }
+  } catch (e) { /* board unreachable; poll() will report it */ }
+  poll();
+})();
 // Don't poll a tab nobody is looking at. Every status request costs the Pi a
 // little CPU on the same interpreter that's feeding the Xbox, and a phone left
 // on this page in a pocket would otherwise keep asking all match.

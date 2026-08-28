@@ -75,6 +75,7 @@ try:
 except ImportError:
     sys.exit("websockets missing.  Run: pip3 install --break-system-packages websockets")
 
+import auth as auth_mod
 import layouts as layouts_mod
 
 # Optional X52 Pro MFD status display (libx52). Silent no-op if not installed.
@@ -263,6 +264,16 @@ class Telemetry:
     def set_menu(self, on):
         self.hub.set(menu=on)
         if self.mfd: self.mfd.set_menu(on)
+
+    def set_pin(self, pin, seconds):
+        """A pairing PIN goes to the throttle screen AND the journal — always
+        both. Without the journal copy, anyone whose board has no libx52 (or
+        no X52 Pro) would be locked out of their own web app on day one."""
+        if pin:
+            print(f"[auth]   PIN {pin} — valid {int(seconds)}s "
+                  f"(enter it in the web app)", flush=True)
+        if self.mfd:
+            self.mfd.set_pin(pin, seconds)
 
     def set_game(self, name, short, display):
         self.hub.set(layout=name, layout_short=short, layout_display=display)
@@ -1016,6 +1027,13 @@ def main():
                     help="print controller state on every poll. Useful for "
                          "debugging, but it formats and logs a line hundreds "
                          "of times a second — don't leave it on while playing")
+    ap.add_argument("--no-auth", action="store_true",
+                    help="serve the web app with no PIN at all. Recovery and "
+                         "trusted-network use only — it hands anyone on the "
+                         "LAN full control of the app")
+    ap.add_argument("--reset-auth", action="store_true",
+                    help="drop every saved web session at startup, so only a "
+                         "fresh PIN gets back in")
     ap.add_argument("--dscp", action="store_true",
                     help="mark packets DSCP EF / priority 6 to claim a "
                          "high-priority WiFi queue. Helps on some access "
@@ -1140,8 +1158,21 @@ def main():
     if web_port:
         try:
             import webapp
-            webapp.start(web_port, hub, mgr, state, telemetry, capture)
+            auth = None
+            if not args.no_auth:
+                auth = auth_mod.Auth(auth_mod.state_dir(),
+                                     on_pin=telemetry.set_pin)
+                if args.reset_auth:
+                    n = auth.revoke_all()
+                    print(f"[auth]   cleared {n} session(s)")
+            webapp.start(web_port, hub, mgr, state, telemetry, capture, auth)
             print(f"[web]    layout editor + status: http://{local_ip}:{web_port}")
+            if auth:
+                print("[auth]   the web app asks for a PIN. It appears on the "
+                      "throttle screen and here in the log.")
+            else:
+                print("[auth]   DISABLED (--no-auth): anyone on the LAN has "
+                      "full access to the web app")
         except Exception as e:
             print(f"[web]    disabled ({e})")
 

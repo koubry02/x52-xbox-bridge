@@ -17,17 +17,33 @@ API:
   POST /api/capture   {"kind"}     listen for the next button press / axis move
   GET  /api/capture                what it heard (idle/listening/detected)
   DELETE /api/capture              stop listening
+  POST /api/auth/pin               show a PIN on the throttle screen + journal
+  POST /api/auth/login {"pin"}     trade it for a token, or refresh step-up
+  GET  /api/auth                   who am I, and are my sessions
+  POST /api/auth/logout            drop this session
+  POST /api/auth/revoke-all        drop every session   [privileged]
 
-No auth: everyone on your LAN can edit layouts and poke menu mode. That is
-the point of the tool — don't expose the port to the internet.
+AUTH. Everything but the page shell and the PIN request needs a bearer token,
+obtained by reading a PIN off the X52's screen (or root's journal) — proof you
+are at the stick or on the box. Operations that run code additionally need a
+PIN redeemed in the last two minutes, because this is plaintext HTTP and a
+bearer token can be sniffed and replayed. See auth.py.
+
+Tokens travel in the Authorization header, never a cookie: a cookie would make
+every endpoint CSRF-able by any site you happen to visit, since your browser
+can reach this port. We also refuse cross-origin requests outright, and refuse
+a Host header that is a name rather than an IP, which is what DNS rebinding
+needs.
 """
 
+import ipaddress
 import json
 import os
 import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import auth as auth_mod
 import layouts as layouts_mod
 
 try:
@@ -48,13 +64,65 @@ def _known_codes():
     return {"axes": axes, "buttons": btns}
 
 
-def start(port, hub, mgr, state, telemetry, capture=None):
+def start(port, hub, mgr, state, telemetry, capture=None, auth=None):
     """Start the web server in a daemon thread. Returns the thread."""
 
     codes = _known_codes()
 
+    # Reachable without a token: the shell you type the PIN into, and asking
+    # for a PIN. Nothing else — no status, no layout names, no leak of whether
+    # you are mid-game.
+    OPEN_PATHS = {"/", "/index.html", "/favicon.ico",
+                  "/api/auth/pin", "/api/auth/login"}
+    # Runs code or drops everyone's access: token AND a fresh PIN.
+    PRIVILEGED_PATHS = {"/api/auth/revoke-all"}
+
     class Handler(BaseHTTPRequestHandler):
         server_version = "HOTASBridge/1.0"
+
+        # ---- auth gate ----
+        def _bearer(self):
+            h = self.headers.get("Authorization", "")
+            return h[7:].strip() if h[:7].lower() == "bearer " else None
+
+        def _origin_ok(self):
+            """A browser only sends Origin cross-origin. We have no business
+            being called that way, so any Origin at all is a refusal."""
+            o = self.headers.get("Origin")
+            if not o:
+                return True
+            host = self.headers.get("Host", "")
+            return o.split("//")[-1] == host
+
+        def _host_ok(self):
+            """DNS rebinding needs a NAME to point at us. A LAN appliance is
+            only ever reached by address, so names are refused."""
+            host = (self.headers.get("Host") or "").rsplit(":", 1)[0].strip("[]")
+            if not host or host in ("localhost",):
+                return True
+            try:
+                ipaddress.ip_address(host)
+                return True
+            except ValueError:
+                return False
+
+        def _authorised(self):
+            """None if the request may proceed, else (code, message)."""
+            if not self._host_ok():
+                return 403, "reach this board by IP address, not by name"
+            if not self._origin_ok():
+                return 403, "cross-origin requests are refused"
+            if auth is None:
+                return None
+            path = self.path.split("?")[0]
+            if path in OPEN_PATHS:
+                return None
+            tok = self._bearer()
+            if not auth.check(tok):
+                return 401, "enter the PIN shown on your throttle screen"
+            if path in PRIVILEGED_PATHS and not auth.stepped_up(tok):
+                return 403, "stepup"
+            return None
 
         # ---- plumbing ----
         def log_message(self, fmt, *a):        # keep journalctl readable
@@ -88,6 +156,9 @@ def start(port, hub, mgr, state, telemetry, capture=None):
 
         # ---- GET ----
         def do_GET(self):
+            deny = self._authorised()
+            if deny:
+                return self._err(deny[0], deny[1])
             if self.path == "/favicon.ico":
                 return self._send(204, b"", "image/x-icon")
             if self.path in ("/", "/index.html"):
@@ -110,6 +181,17 @@ def start(port, hub, mgr, state, telemetry, capture=None):
                 if capture is None:
                     return self._err(503, "capture unavailable")
                 return self._send(200, capture.status())
+
+            if self.path == "/api/auth":
+                if auth is None:
+                    return self._send(200, {"enabled": False})
+                tok = self._bearer()
+                return self._send(200, {
+                    "enabled": True,
+                    "stepped_up": auth.stepped_up(tok),
+                    "stepup_seconds": int(auth_mod.STEPUP_S),
+                    "sessions": auth.sessions(),
+                })
 
             if self.path == "/api/codes":
                 return self._send(200, {
@@ -143,6 +225,9 @@ def start(port, hub, mgr, state, telemetry, capture=None):
 
         # ---- PUT (save layout) ----
         def do_PUT(self):
+            deny = self._authorised()
+            if deny:
+                return self._err(deny[0], deny[1])
             name = self._layout_name()
             if not name:
                 return self._err(404, "PUT /api/layouts/<name>")
@@ -165,6 +250,9 @@ def start(port, hub, mgr, state, telemetry, capture=None):
 
         # ---- DELETE ----
         def do_DELETE(self):
+            deny = self._authorised()
+            if deny:
+                return self._err(deny[0], deny[1])
             if self.path == "/api/capture":
                 if capture is None:
                     return self._err(503, "capture unavailable")
@@ -186,6 +274,46 @@ def start(port, hub, mgr, state, telemetry, capture=None):
 
         # ---- POST ----
         def do_POST(self):
+            deny = self._authorised()
+            if deny:
+                return self._err(deny[0], deny[1])
+
+            if self.path == "/api/auth/pin":
+                if auth is None:
+                    return self._err(503, "auth disabled")
+                pin, secs, fresh = auth.request_pin()
+                # The PIN itself is never returned over the wire — that would
+                # defeat the entire point. Only how long it lasts.
+                if pin is None:
+                    return self._err(429, f"wait {int(secs) + 1}s for a new PIN")
+                return self._send(200, {"seconds": int(secs), "fresh": fresh,
+                                        "digits": auth_mod.PIN_DIGITS})
+
+            if self.path == "/api/auth/login":
+                if auth is None:
+                    return self._err(503, "auth disabled")
+                try:
+                    pin = str(self._body_json().get("pin", ""))
+                except ValueError as e:
+                    return self._err(400, f"bad JSON: {e}")
+                tok, err = auth.redeem(
+                    pin, token=self._bearer(),
+                    ip=self.client_address[0],
+                    agent=self.headers.get("User-Agent", ""))
+                if err:
+                    return self._err(401, err)
+                return self._send(200, {"token": tok,
+                                        "stepup_seconds": int(auth_mod.STEPUP_S)})
+
+            if self.path == "/api/auth/logout":
+                if auth is not None:
+                    auth.revoke(self._bearer())
+                return self._send(200, {"ok": True})
+
+            if self.path == "/api/auth/revoke-all":
+                if auth is None:
+                    return self._err(503, "auth disabled")
+                return self._send(200, {"revoked": auth.revoke_all()})
             if self.path == "/api/capture":
                 if capture is None:
                     return self._err(503, "capture unavailable")
