@@ -50,10 +50,13 @@ Usage:
 
 import argparse
 import asyncio
+import collections
+import fcntl
 import json
 import math
 import os
 import socket
+import struct
 import sys
 import threading
 import time
@@ -83,6 +86,30 @@ except ImportError:
 PORT          = 26401
 WEB_PORT      = 8088
 PING_MAX_MS   = 10_000    # above this it's a gap in polling, not latency
+WORST_WINDOW  = 5.0       # seconds of history behind the "worst" latency figure
+
+# How long a thread may hold the GIL before it must offer it up. Python's
+# default is 5ms, which is longer than this whole program's latency budget:
+# whenever any thread does a CPU burst — compiling a layout on a switch,
+# serialising a status response — the reader and the responder can sit behind
+# it for milliseconds. Measured on a busy interpreter, dropping this to 0.5ms
+# takes the median wait for the GIL from 5.2ms to 0.7ms. Nothing here is
+# CPU-bound, so the extra switching costs us nothing.
+GIL_SWITCH_S  = 0.0005
+
+# EVIOCSCLOCKID — ask the kernel to timestamp input events with CLOCK_MONOTONIC
+# instead of the wall clock, so an event's own timestamp can be compared
+# directly against time.monotonic() without NTP steps corrupting it.
+_EVIOCSCLOCKID = 0x400445A0
+
+
+def use_monotonic_timestamps(dev):
+    """Returns the clock to read 'now' from for this device's event stamps."""
+    try:
+        fcntl.ioctl(dev.fd, _EVIOCSCLOCKID, struct.pack("i", time.CLOCK_MONOTONIC))
+        return time.monotonic
+    except (OSError, AttributeError, ValueError):
+        return time.time      # kernel too old; wall-clock stamps still work
 AXIS_TARGETS  = ("lx", "ly", "rx", "ry", "lt", "rt")
 SPLIT_TARGET  = "split_lt_rt"
 
@@ -191,7 +218,8 @@ class StatusHub:
         self._lock = threading.Lock()
         self._d = {
             "ip": "", "device": "", "connected": False, "ping_ms": None,
-            "ping_at": None, "menu": False, "layout": None,
+            "ping_at": None, "input_ms": None, "link_ms": None,
+            "worst_ms": None, "menu": False, "layout": None,
             "layout_display": None, "layout_short": None,
             "legacy_config": None, "started": time.time(),
         }
@@ -220,13 +248,19 @@ class Telemetry:
         self.mfd = mfd
 
     def set_connected(self, on):
-        self.hub.set(connected=on,
-                     **({} if on else {"ping_ms": None, "ping_at": None}))
+        self.hub.set(connected=on, **({} if on else {
+            "ping_ms": None, "ping_at": None, "input_ms": None,
+            "link_ms": None, "worst_ms": None}))
         if self.mfd: self.mfd.set_connected(on)
 
-    def set_ping(self, ms):
-        self.hub.set(ping_ms=round(ms, 1), ping_at=time.monotonic())
-        if self.mfd: self.mfd.set_ping(ms)
+    def set_latency(self, input_ms, link_ms, total_ms, worst_ms):
+        self.hub.set(
+            ping_ms=round(total_ms, 1),          # the headline: input -> Xbox
+            input_ms=None if input_ms is None else round(input_ms, 1),
+            link_ms=round(link_ms, 1),
+            worst_ms=round(worst_ms, 1),
+            ping_at=time.monotonic())
+        if self.mfd: self.mfd.set_latency(total_ms, input_ms, link_ms)
 
     def set_menu(self, on):
         self.hub.set(menu=on)
@@ -354,12 +388,34 @@ class HOTASState:
         self._suspended = False
         self._throttle_targets = tuple(throttle_targets)
         self._capture = capture
+        # When the input behind the current state physically happened, and
+        # whether it has been put on the wire yet. Together these give the one
+        # latency figure we can measure exactly: how stale the data was at the
+        # moment we handed it to the Xbox.
+        self._stamp = None
+        self._stamp_fresh = False
 
-    def update(self, axes, g1, g2):
+    def update(self, axes, g1, g2, stamp=None):
         with self._lock:
             self._axes = dict(axes)
             self._g1   = g1
             self._g2   = g2
+            if stamp is not None:
+                self._stamp = stamp
+                self._stamp_fresh = True
+
+    def take_input_age(self):
+        """Age of the input we just served, in ms — once per genuine input.
+
+        Returns None when this poll carried nothing new, which is most of them:
+        a poll that repeats an unchanged state isn't late, there's simply
+        nothing newer to send."""
+        with self._lock:
+            if not self._stamp_fresh or self._stamp is None:
+                return None
+            self._stamp_fresh = False
+            age = (time.monotonic() - self._stamp) * 1000.0
+        return age if 0 <= age < 10_000 else None
 
     def set_throttle_targets(self, targets):
         with self._lock:
@@ -567,7 +623,8 @@ class LayoutManager:
 
 # ─── evdev reader (runs in daemon thread) ────────────────────────────────────
 
-def evdev_reader(dev, mgr, state, telemetry, verbose=False, capture=None):
+def evdev_reader(dev, mgr, state, telemetry, verbose=False, capture=None,
+                 ev_clock=None):
     m = None                    # current Mappings; reset state when it changes
     axes = pressed = hat = axis_st = None
     mode = 1
@@ -614,6 +671,7 @@ def evdev_reader(dev, mgr, state, telemetry, verbose=False, capture=None):
                         # held so the button you pressed to identify it doesn't
                         # register as a real input the moment output resumes.
                         pressed.clear()
+                        btn_dirty = True    # or the cleared keys stay latched
                     was_capturing = capturing
 
                 if ev.type == ecodes.EV_ABS:
@@ -739,7 +797,16 @@ def evdev_reader(dev, mgr, state, telemetry, verbose=False, capture=None):
                     ax = dict(axes)
                     ax["lt"] = lt
                     ax["rt"] = rt
-                    state.update(ax, g1, g2)
+                    # Carry the kernel's own timestamp for this event, moved
+                    # into the monotonic domain. That's the real moment the
+                    # stick moved, so the age measured when we send it is
+                    # genuine input latency and not an estimate.
+                    stamp = None
+                    if ev_clock is not None:
+                        lag = ev_clock() - ev.timestamp()
+                        if 0 <= lag < 1.0:          # ignore a clock step
+                            stamp = time.monotonic() - lag
+                    state.update(ax, g1, g2, stamp)
 
         except OSError:
             time.sleep(1)  # device unplugged; keep trying
@@ -793,10 +860,16 @@ def make_handler(state, verbose, telemetry):
         await websocket.send(handshake)
         telemetry.set_connected(True)
 
-        # Smoothed poll interval -> shown on the MFD as "ping" (round-trip
-        # cadence of the Oberon client's polls, in ms).
+        # The Oberon client's loop is strictly synchronous — send, await the
+        # reply, inject, send again, with no timer (see SocketClient.cs in
+        # SamsidParty/OberonRemote). So the gap between OUR send completing and
+        # the NEXT request landing is a real round trip: transit out, inject,
+        # transit back. Measuring from our own send rather than request to
+        # request keeps our own processing out of the figure.
         ema = None
-        last_poll = time.monotonic()
+        sent_at = None
+        worst = collections.deque()      # (when, total_ms) over WORST_WINDOW
+        input_ema = None
 
         try:
             async for msg in websocket:
@@ -806,25 +879,46 @@ def make_handler(state, verbose, telemetry):
                     continue
 
                 now = time.monotonic()
-                dt = (now - last_poll) * 1000.0  # ms since last poll
-                last_poll = now
-                # Anything up to PING_MAX_MS is a real measurement, lag
-                # included — discarding the slow samples was exactly what made
-                # the displayed figure keep reading healthy during a stall.
-                # Beyond that it's a gap, not latency, so restart the average.
-                if 0 < dt <= PING_MAX_MS:
-                    # Rise fast, fall slow: lag should show up on the throttle
-                    # screen the moment it starts, not average itself away.
-                    a = 0.5 if (ema is not None and dt > ema) else 0.2
-                    ema = dt if ema is None else ((1 - a) * ema + a * dt)
-                    telemetry.set_ping(ema)
-                elif dt > PING_MAX_MS:
-                    ema = None
-                    telemetry.set_ping(dt)
+                if sent_at is not None:
+                    dt = (now - sent_at) * 1000.0   # our send -> this request
+                    # Anything up to PING_MAX_MS is a real measurement, lag
+                    # included — discarding the slow samples was exactly what
+                    # made the displayed figure keep reading healthy during a
+                    # stall. Beyond that it's a gap, not latency.
+                    if 0 < dt <= PING_MAX_MS:
+                        # Rise fast, fall slow: lag should show on the throttle
+                        # screen the moment it starts, not average itself away.
+                        a = 0.5 if (ema is not None and dt > ema) else 0.2
+                        ema = dt if ema is None else ((1 - a) * ema + a * dt)
+                    elif dt > PING_MAX_MS:
+                        ema = dt
 
                 axes, g1, g2 = state.snapshot()
                 pkt = build_packet(axes, g1, g2)
                 await websocket.send(pkt)
+                sent_at = time.monotonic()
+
+                # How stale was what we just sent? Only a poll that carried a
+                # genuinely new input answers this — the rest are repeats of a
+                # state the Xbox already has.
+                age = state.take_input_age()
+                if age is not None:
+                    a = 0.5 if (input_ema is not None and age > input_ema) else 0.2
+                    input_ema = age if input_ema is None else ((1 - a) * input_ema + a * age)
+                if ema is not None:
+                    # Input latency to the Xbox = how long the input waited
+                    # here, plus the trip out. The return leg of the round trip
+                    # is the client asking for the NEXT packet, which this
+                    # input never waits for, so only half the RTT counts.
+                    base = input_ema if input_ema is not None else ema / 2.0
+                    total = base + ema / 2.0
+                    worst.append((sent_at, total))
+                    cut = sent_at - WORST_WINDOW
+                    while worst and worst[0][0] < cut:
+                        worst.popleft()
+                    telemetry.set_latency(
+                        input_ms=input_ema, link_ms=ema, total_ms=total,
+                        worst_ms=max(v for _, v in worst) if worst else total)
 
                 if verbose:
                     lt = (axes["lt"] + 1) / 2
@@ -862,6 +956,10 @@ def main():
                          "the Xbox dashboard doesn't scroll; press the suspend "
                          "button once in-game to start flying")
     args = ap.parse_args()
+
+    # Before any threads exist: keep one busy thread from holding the GIL long
+    # enough to delay the stick or the reply. See GIL_SWITCH_S.
+    sys.setswitchinterval(GIL_SWITCH_S)
 
     if args.list:
         for path in list_devices():
@@ -908,6 +1006,13 @@ def main():
 
     absinfo = dict(dev.capabilities().get(ecodes.EV_ABS, []))
     dev.grab()   # exclusive: nothing else on this board consumes the stick
+
+    # Kernel event timestamps are what make the latency figure real rather than
+    # a guess: they mark when the stick actually moved, before any of our code
+    # has run.
+    ev_clock = use_monotonic_timestamps(dev)
+    print(f"[evdev]  input timestamps: "
+          f"{'monotonic' if ev_clock is time.monotonic else 'wall clock'}")
 
     if args.menu and not base_cfg.get("suspend_button"):
         print("  [!] --menu set but no working suspend_button — you won't be able\n"
@@ -959,7 +1064,7 @@ def main():
 
     threading.Thread(
         target=evdev_reader,
-        args=(dev, mgr, state, telemetry, args.verbose, capture),
+        args=(dev, mgr, state, telemetry, args.verbose, capture, ev_clock),
         daemon=True
     ).start()
 

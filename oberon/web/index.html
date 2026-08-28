@@ -170,6 +170,20 @@ h2.sec:first-child { margin-top: 2px; }
                  letter-spacing: 0; }
 .ok { color: var(--green); } .warn { color: var(--amber); } .bad { color: var(--red); }
 
+/* latency breakdown — a bar per stage, so you can see which half is the problem */
+.latrow { display: flex; align-items: center; gap: 12px; padding: 7px 0; }
+.latrow .ll { flex: none; width: 40%; font-size: 13px; color: var(--txt-2); }
+.latrow .lb { flex: 1; height: 6px; border-radius: var(--pill);
+              background: var(--surface-2); overflow: hidden; }
+.latrow .lb i { display: block; height: 100%; width: 0; border-radius: var(--pill);
+                background: var(--txt-3); transition: width .4s var(--ease); }
+.latrow .lv { flex: none; min-width: 62px; text-align: right; font-weight: 600;
+              font-size: 14px; font-variant-numeric: tabular-nums;
+              font-family: ui-monospace, monospace; }
+.latrow.tot { border-top: 1px solid var(--line-soft); margin-top: 4px; padding-top: 11px; }
+.latrow.tot .ll { color: var(--txt); font-weight: 600; }
+.latrow.tot .lv { font-size: 17px; }
+
 .trow { display: flex; align-items: center; gap: 14px; }
 .trow .txt { flex: 1; min-width: 0; }
 .trow .t1 { font-weight: 600; font-size: 14.5px; }
@@ -513,9 +527,26 @@ textarea { min-height: 300px; resize: vertical; font-family: ui-monospace, monos
     <h2 class="sec">Bridge</h2>
     <div class="grid2">
       <div class="stat"><div class="k">Xbox</div><div class="v" id="s-xbox">—</div></div>
-      <div class="stat"><div class="k">Poll ping</div><div class="v" id="s-ping">—</div></div>
+      <div class="stat"><div class="k">Input latency</div><div class="v" id="s-ping">—</div></div>
       <div class="stat"><div class="k">Uptime</div><div class="v" id="s-up">—</div></div>
       <div class="stat"><div class="k">Board IP</div><div class="v mono" id="s-ip" style="font-size:15px">—</div></div>
+    </div>
+
+    <h2 class="sec">Where the latency goes</h2>
+    <div class="card" id="s-lat">
+      <div class="latrow"><span class="ll">On this board</span>
+        <span class="lb"><i id="lb-in"></i></span>
+        <span class="lv" id="s-in">—</span></div>
+      <div class="latrow"><span class="ll">Trip to the Xbox</span>
+        <span class="lb"><i id="lb-link"></i></span>
+        <span class="lv" id="s-link">—</span></div>
+      <div class="latrow tot"><span class="ll">Stick moved → Xbox has it</span>
+        <span class="lb"></span>
+        <span class="lv" id="s-tot">—</span></div>
+      <div class="latrow"><span class="ll">Worst in the last 5s</span>
+        <span class="lb"></span>
+        <span class="lv" id="s-worst">—</span></div>
+      <p class="note" id="s-latnote"></p>
     </div>
     <p class="note" id="s-dev"></p>
   </section>
@@ -782,14 +813,49 @@ async function poll() {
   $("#s-up").textContent = fmtUp(s.uptime_s);
   $("#s-ip").textContent = s.ip || "—";
   $("#s-dev").textContent = s.device ? `Reading ${s.device}` : "";
+  renderLatency(s);
 
   renderLayouts();
 }
+/* Where the latency actually goes. "On this board" is measured exactly: the
+   kernel timestamps the input the instant the stick moves, and we compare that
+   against the moment it goes on the wire. The trip to the Xbox is a real round
+   trip, because the Oberon client polls strictly synchronously — so half of it
+   is the outbound leg the input actually rides. */
+const fmtMs = v => v == null ? "—"
+  : v >= 1000 ? (v / 1000).toFixed(2) + " s"
+  : v >= 100  ? Math.round(v) + " ms"
+  : v.toFixed(1) + " ms";
+function renderLatency(s) {
+  const live = s.connected && !s.ping_stale && s.link_ms != null;
+  const inMs = live ? s.input_ms : null;
+  const half = live ? s.link_ms / 2 : null;
+  $("#s-in").textContent    = fmtMs(inMs);
+  $("#s-link").textContent  = live ? fmtMs(s.link_ms) + "  rt" : "—";
+  $("#s-tot").textContent   = live ? fmtMs(s.ping_ms) : (s.connected ? "stalled" : "—");
+  $("#s-worst").textContent = live ? fmtMs(s.worst_ms) : "—";
+  $("#s-tot").className  = "lv " + (!live ? "warn"
+    : s.ping_ms > 60 ? "bad" : s.ping_ms > 25 ? "warn" : "ok");
+  // Bars are proportional to the total, so the longer one is the one to fix.
+  const tot = live ? Math.max(s.ping_ms, 1) : 1;
+  $("#lb-in").style.width   = live && inMs != null ? `${Math.min(100, inMs / tot * 100)}%` : "0";
+  $("#lb-link").style.width = live && half != null ? `${Math.min(100, half / tot * 100)}%` : "0";
+  $("#s-latnote").textContent = !live ? ""
+    : (inMs != null && s.link_ms / 2 > inMs * 1.6)
+      ? "The network is the bigger half — see the Latency notes in the README."
+      : (inMs != null && inMs > s.link_ms / 2 * 1.6)
+        ? "Most of it is waiting here for the Xbox to ask again, which the link speed sets."
+        : "Move the stick to take a fresh reading.";
+}
+
 /* A replica of what the throttle screen is showing right now — same three
    16-character lines, same rules, so the answer to "what does my stick say"
    is on the page. Mirrors MFDStatus._render in mfd.py. */
+const mfdShort = ms => ms == null ? "--"
+  : ms >= 1000 ? (ms / 1000).toFixed(1) + "s"
+  : ms < 10 ? ms.toFixed(1) + "ms" : Math.round(ms) + "ms";
 function mfdLines(s, act) {
-  let l1;
+  let l0 = s.ip || "no IP", l1;
   if (!s.connected) l1 = "XBOX:--  waiting";
   else {
     let p;
@@ -798,11 +864,16 @@ function mfdLines(s, act) {
     else if (s.ping_ms >= 1000) p = (s.ping_ms / 1000).toFixed(1) + "s";
     else                        p = Math.round(s.ping_ms) + "ms";
     l1 = "XBOX:ON " + p.padStart(7);
+    // The IP only matters until you're connected; after that the line shows
+    // the split. Mirrors MFDStatus._render.
+    if (s.input_ms != null && s.link_ms != null && !s.ping_stale)
+      l0 = "IN" + mfdShort(s.input_ms).padStart(5) +
+           " LNK" + mfdShort(s.link_ms).padStart(5);
   }
   const menu = "MENU:" + (s.menu ? "ON" : "OFF");
   const game = act ? act.short_name : "";
   const l2 = game ? menu.padEnd(8) + game.padStart(8) : menu;
-  return [(s.ip || "no IP"), l1, l2].map(x => x.slice(0, 16).padEnd(16));
+  return [l0, l1, l2].map(x => x.slice(0, 16).padEnd(16));
 }
 const fmtUp = s => s == null ? "—"
   : s >= 3600 ? `${Math.floor(s/3600)}h ${Math.floor(s%3600/60)}m`

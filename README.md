@@ -319,10 +319,29 @@ M2 a d-pad/systems layer, M3 menus.
 
 ---
 
-## Latency — where it actually comes from
+## Latency — measured, not estimated
 
-Short version: **it's the WiFi, not the software.** Measured on the input path,
-per poll at 250 Hz:
+The bridge measures your real input latency: **from the moment the stick
+physically moved to the moment the Xbox has it.** Both halves are genuine
+measurements, not guesses.
+
+**On this board** comes from the kernel's own timestamp on the input event —
+the instant the hardware reported the movement, before any of this code ran —
+compared against the moment that input goes out on the wire. It's mostly the
+wait for the Xbox to ask for the next packet.
+
+**Trip to the Xbox** is a real round trip. The Oberon client's loop is strictly
+synchronous — send, wait for the reply, inject, send again, with no timer at
+all ([SocketClient.cs][oberon-src]) — so the gap between our reply going out
+and the next request landing *is* the round trip. The input rides the outbound
+half of it.
+
+[oberon-src]: https://github.com/SamsidParty/OberonRemote/blob/main/Oberon/SocketClient.cs
+
+Because the client is synchronous, an input waits on average half a round trip
+before it can even be sent — so **total input latency lands at roughly one
+round trip**, and the link is what sets it. Which is why the software side
+barely matters:
 
 | | cost |
 |---|---|
@@ -350,9 +369,18 @@ After that, in the order that actually helps:
    of the two radios is most of the win.
 3. **Give the Pi a static lease**, so a DHCP renewal can't land mid-match.
 
-You can see all of this working: the throttle screen and the web page read real
-milliseconds, then `1.4s`, then `STALL` as the link degrades. Change one thing
-at a time and watch it.
+You can see all of this working on the throttle screen and the web page. Change
+one thing at a time and watch the numbers move — and watch the **worst in the
+last 5s** figure as much as the average, because a single 200 ms spike mid-turn
+is what you actually feel.
+
+A note on the Python side: the interpreter's default GIL switch interval is
+5 ms, which is longer than this program's whole latency budget — one thread
+doing a burst of work could delay the stick or the reply by more than the
+network does. The server drops it to 0.5 ms at startup, which measured an 8×
+improvement in how long a thread waits to be scheduled under load. The
+throttle-screen thread also runs at a lower priority than the input path, so
+its display updates can never outrank your controls.
 
 **Bandwidth is a non-issue** — the whole link runs at about 0.4 Mbps. There is
 nothing to save there, so the bridge spends its effort on *consistency*
@@ -386,22 +414,30 @@ The X52 Pro's throttle screen can show live bridge status, and the button LEDs
 can reflect state. This needs the **libx52** driver
 (https://github.com/nirenjan/libx52), which the installer sets up for you.
 
+Before you connect, the top line is the IP you need to type into the Oberon
+app. Once you're connected that line has done its job, so it switches to
+showing where your input latency goes:
+
 ```
-192.168.1.69       ← Pi IP (enter this in the Oberon app)
-XBOX:ON    45ms    ← Oberon connected + poll ping
+192.168.1.69       ← Pi IP — until you connect
+XBOX:--  waiting
+
+IN5.6ms LNK 12ms   ← after connecting: on this board / round trip
+XBOX:ON    12ms    ← stick moved → Xbox has it
 MENU:ON       AC7  ← menu mode + active game layout
 ```
 
-The ping line tells the truth when the link degrades — that's the point of it:
+The latency line tells the truth when the link degrades — that's the point:
 
 | Shows | Means |
 |---|---|
-| `45ms` | normal poll cadence |
-| `1.4s` | the Oberon app is polling slowly — real lag |
+| `12ms` | your input reached the Xbox 12 ms after you moved the stick |
+| `1.4s` | real lag |
 | `STALL` | connected, but nothing has arrived for over 1.5s |
 | `waiting` | no Oberon client connected |
 
-The same states appear on the web page's Poll ping card.
+The web page shows the same figures with the split broken out, plus the worst
+reading in the last five seconds — which is what actually ruins a turn.
 
 - **Button LEDs:** green while flying, amber in menu mode. (The X52 Pro's FIRE
   and THROTTLE LEDs are on/off only — hardware limitation — so those don't

@@ -23,6 +23,7 @@ Every line is written padded to the full 16 characters: the MFD does not
 clear a line first, so a shorter string would leave the tail of the previous
 one on screen.
 """
+import os
 import shutil
 import subprocess
 import threading
@@ -113,14 +114,25 @@ def set_led_brightness(level_0_128):
     _cli("bri", "led", str(lvl))
 
 
+_last_onoff = None
+
+
 def set_all_leds(color):
     """Set every color LED to `color` (green/amber/red/off) and the on/off
-    LEDs to on (for green/amber) or off (for off)."""
+    LEDs to on (for green/amber) or off (for off).
+
+    Every one of these is a process spawn plus a USB control transfer, so the
+    on/off pair is only touched when it actually changes — green and amber
+    both mean "on", and re-sending that on every menu toggle was two wasted
+    round-trips out of eleven."""
+    global _last_onoff
     for led in _COLOR_LEDS:
         _cli("led", led, color)
     onoff = "off" if color == "off" else "on"
-    for led in _ONOFF_LEDS:
-        _cli("led", led, onoff)
+    if onoff != _last_onoff:
+        _last_onoff = onoff
+        for led in _ONOFF_LEDS:
+            _cli("led", led, onoff)
 
 
 class MFDStatus:
@@ -136,6 +148,11 @@ class MFDStatus:
         self._connected = False
         self._ping_ms = None
         self._ping_at = None   # when the last poll landed, for stall detection
+        self._input_ms = None  # of the total, the part spent on this board
+        self._link_ms = None   # measured round trip to the Xbox and back
+        # Set by anything the user is waiting to see, so the refresh loop
+        # redraws now instead of on its next tick.
+        self._wake = threading.Event()
         self._menu = False
         self._game = ""      # active layout short_name, e.g. "AC7"
         self._last_led = None
@@ -161,20 +178,35 @@ class MFDStatus:
             if not connected:
                 self._ping_ms = None
                 self._ping_at = None
+                self._input_ms = None
+                self._link_ms = None
 
-    def set_ping(self, ping_ms):
+    def set_latency(self, total_ms, input_ms, link_ms):
+        """total = stick moved -> Xbox has it. input = the part spent here."""
         with self._lock:
-            self._ping_ms = ping_ms
+            self._ping_ms = total_ms
+            self._input_ms = input_ms
+            self._link_ms = link_ms
             self._ping_at = time.monotonic()
+
+    def set_ping(self, ping_ms):            # kept for callers that only have one figure
+        self.set_latency(ping_ms, None, None)
 
     def set_menu(self, menu_on):
         with self._lock:
+            changed = self._menu != menu_on
             self._menu = menu_on
+        if changed:
+            self._wake.set()   # you pressed a button; don't wait for a tick
 
     def set_game(self, short_name):
         """Show which game layout is active (right side of the MENU line)."""
         with self._lock:
-            self._game = (short_name or "")[:8]
+            name = (short_name or "")[:8]
+            changed = self._game != name
+            self._game = name
+        if changed:
+            self._wake.set()
 
     def set_mfd_brightness(self, level_0_128):
         """Live MFD brightness from the throttle knob (0..128)."""
@@ -204,21 +236,49 @@ class MFDStatus:
             return f"{ping_ms / 1000:.1f}s"      # 1.4s reads better than 1400ms
         return f"{int(ping_ms)}ms"
 
+    @staticmethod
+    def _fmt_short(ms):
+        """A latency in at most 5 characters, for the breakdown line."""
+        if ms is None:
+            return "--"
+        if ms >= 1000:
+            return f"{ms / 1000:.1f}s"      # 1.5s
+        if ms < 10:
+            return f"{ms:.1f}ms"            # 6.2ms — tenths matter down here
+        return f"{int(ms)}ms"               # 12ms / 148ms
+
     def _render(self):
         with self._lock:
-            ip = self._ip or "no IP"
+            l0 = self._ip or "no IP"
             if self._connected:
                 age = None if self._ping_at is None else (time.monotonic() - self._ping_at)
                 l1 = f"XBOX:ON {self._fmt_ping(self._ping_ms, age):>7}"
+                # The IP only matters until you're connected — once you are,
+                # this line is better spent showing where the latency goes:
+                # how long the input sat on this board vs the trip to the Xbox.
+                if (self._input_ms is not None and self._link_ms is not None
+                        and not (age is not None and age > STALL_AFTER_S)):
+                    # 2 + 5 + 1 + 3 + 5 = exactly the 16 characters available.
+                    l0 = (f"IN{self._fmt_short(self._input_ms):>5}"
+                          f" LNK{self._fmt_short(self._link_ms):>5}")
             else:
                 l1 = "XBOX:--  waiting"
             menu = f"MENU:{'ON' if self._menu else 'OFF'}"
             l2 = f"{menu:<8}{self._game:>8}" if self._game else menu
+            ip = l0
         # Pad here too: every line handed to _set_line is a full-width overwrite.
         return tuple(s[:_LINE_LEN].ljust(_LINE_LEN) for s in (ip, l1, l2))
 
     def _loop(self, hz):
-        # Give the device a moment to settle, then refresh on a cadence.
+        # The display must never outrank the stick. The service runs at
+        # Nice=-10 so the input path wins under load, but that applies to every
+        # thread — including this one, whose job is a burst of fork/exec plus
+        # USB round-trips. On Linux nice is per-thread, so drop just this one.
+        try:
+            os.setpriority(os.PRIO_PROCESS, threading.get_native_id(), 10)
+        except (OSError, AttributeError, ValueError):
+            pass
+
         period = 1.0 / max(0.5, hz)
         drawn = [None, None, None]      # what's actually on each line
         while not self._stop:
@@ -238,4 +298,9 @@ class MFDStatus:
             if want_led != self._last_led:
                 set_all_leds(want_led)
                 self._last_led = want_led
-            time.sleep(period)
+            # Wait for the next tick OR for something to actually change.
+            # Toggling menu mode used to sit here for up to half a second
+            # before the screen and the LEDs caught up, which read as the
+            # toggle itself being slow.
+            self._wake.wait(period)
+            self._wake.clear()
