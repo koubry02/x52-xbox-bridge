@@ -1,179 +1,285 @@
 # HOTAS Bridge
 
-**Use a Saitek X52 / X52 Pro on an Xbox Series X|S — wirelessly, with one Orange Pi.**
+> Use a Saitek X52 / X52 Pro on an Xbox Series X|S — wirelessly, with one Orange Pi
 
 No adapter, no second board, no soldering, no Dev Mode. The Pi reads your stick
-and streams its inputs to the free **Oberon Remote** app on the Xbox, which
-injects them as a controller.
+over USB and streams it to the free **Oberon Remote** app on the Xbox, which
+injects it as a controller. Ships with tuned layouts for Star Wars: Squadrons,
+Ace Combat 7, Battlefield 6 and MSFS 2024 — switch between them with a button
+on the throttle, and edit them from your phone.
 
 ```
 X52  ──USB──►  Orange Pi Zero 3  ──WiFi──►  Oberon app on Xbox  ──►  game
 ```
 
-Ships with tuned layouts for **Star Wars: Squadrons**, **Ace Combat 7**,
-**Battlefield 6** and **MSFS 2024** — switch between them with a button on the
-throttle, and edit them from a browser on your network.
+## Installing / Getting started
 
----
-
-## What's where
-
-```
-hotas-bridge/
-├── install.sh                     one-shot installer (sudo ./install.sh oberon)
-├── x52_layout.png                 the layout diagram below
-├── layouts/                       ← game layouts (JSON, with inheritance)
-│   ├── default.json               the base every game inherits from
-│   ├── squadrons.json             Star Wars: Squadrons
-│   ├── ac7.json                   Ace Combat 7: Skies Unknown
-│   ├── bf6.json                   Battlefield 6 (aircraft)
-│   └── msfs2024.json              MS Flight Simulator 2024
-├── tools/
-│   └── wifi_tune.sh               kills WiFi power save (the latency fix)
-└── oberon/
-    ├── oberon_server.py           the server: reads X52, talks to Oberon
-    ├── layouts.py                 layout loading, inheritance, validation
-    ├── webapp.py                  the LAN status page + layout editor
-    ├── web/index.html             its front end
-    ├── mfd.py                     throttle-screen + LED status (libx52)
-    ├── build_libx52.sh            builds libx52 from source (Armbian/arm64)
-    ├── calibrate.py               calibration wizard
-    └── hotas-oberon.service       starts the server on boot (menu mode)
-```
-
-The `proxy/`, `receiver/` and `sender/` folders belong to an alternative
-USB-hardware mode and aren't needed for Oberon.
-
----
-
-## Quick start
+You need an Orange Pi (or any Linux SBC) on the same network as the Xbox, with
+the stick plugged into it over USB.
 
 **1. Install the Xbox app.** Microsoft Store → search **Oberon Remote Input**
 (by SamsidParty) → install. Retail mode is fine, no Dev Mode needed.
 
-**2. Install on the Pi.** Copy this folder to the Orange Pi, then:
+**2. Install on the Pi.**
 
 ```bash
-cd hotas-bridge
+git clone https://github.com/koubry02/x52-xbox-bridge
+cd x52-xbox-bridge
 sudo ./install.sh oberon
 ```
 
-It installs dependencies and a service that starts on boot. It also offers to
-set up the optional throttle-screen display (see below).
+This installs the Python dependencies, sets up a systemd service that starts on
+boot, turns off WiFi power save (see [Latency](#latency)), and offers to build
+[libx52](https://github.com/nirenjan/libx52) for the throttle screen. It prints
+the board's IP when it finishes.
 
-**3. Calibrate to your stick** (recommended — X52 and X52 Pro report axes under
-different codes):
+**3. Connect.** On the Xbox open **Oberon Remote**, enter the Pi's IP, press
+**Connect**, and fly.
+
+The service starts in *menu mode* with the throttle frozen so it can't scroll
+the dashboard. Press the **E button** on the throttle once you are in the game.
+
+## Initial Configuration
+
+**Calibrate to your stick** (recommended — the X52 and X52 Pro report their
+axes under different codes):
 
 ```bash
 sudo python3 /opt/hotas-bridge/oberon/calibrate.py --game squadrons
 ```
 
-Follow the prompts. It detects your real axes, learns their ranges, skips any
-that jitter on their own, lets you pick the menu-disable button, and applies the
-result automatically.
+It detects your real axes, learns their ranges, skips any that jitter on their
+own, lets you pick the menu-disable button, and applies the result.
 
-**4. Connect.** On the Xbox open **Oberon Remote**, enter the Pi's IP (printed
-on startup, shown on the throttle screen, and on the web page), press
-**Connect**, and fly.
+**Check the link.** WiFi power save is the single biggest source of lag. The
+installer disables it; this shows whether that took:
 
----
+```bash
+sudo /opt/hotas-bridge/tools/wifi_tune.sh --status
+```
 
-## Switching games
+## Developing
 
-Press the **layout button** on the throttle — by default `BTN_BASE4`, the lower
-half of the first T-rocker — to cycle through the installed layouts:
+Pure Python 3 plus `python3-evdev` and `websockets`. No build step.
+
+```bash
+git clone https://github.com/koubry02/x52-xbox-bridge
+cd x52-xbox-bridge
+sudo apt install python3-evdev iw
+pip3 install --break-system-packages websockets
+```
+
+Run it straight from the checkout — reading the stick needs root:
+
+```bash
+sudo python3 oberon/oberon_server.py --menu
+```
+
+Useful while working on a mapping:
+
+```bash
+sudo python3 oberon/oberon_server.py --list     # which device is the stick?
+sudo python3 oberon/oberon_server.py --probe    # print event names as you press
+```
+
+### Deploying
+
+`install.sh` copies the checkout to `/opt/hotas-bridge` and restarts the
+service. It backs the layouts folder up to `layouts-backup-<timestamp>.tgz`
+first and protects layouts you created from deletion, so an upgrade cannot eat
+a profile you built in the editor.
+
+```bash
+sudo ./install.sh oberon
+sudo systemctl restart hotas-oberon
+journalctl -u hotas-oberon -f
+```
+
+## Features
+
+### Game layouts, switched from the stick
+
+Mappings are JSON files in `layouts/`. Press the **layout button** on the
+throttle (default `BTN_BASE4`, the lower half of the first T-rocker) to cycle
+them:
 
 ```
 DEFAULT → SQUADRNS → AC7 → BF6 → MSFS → (back to DEFAULT)
 ```
 
 The switch is instant and safe: the axes publish neutral and any held buttons
-are dropped on the changeover, so a layout switch can never flush a phantom
-input into the game.
+are dropped on the changeover, so a switch can never flush a phantom input into
+the game. The active layout is remembered across reboots.
 
-**Which one am I on?** The active game shows in three places:
+Layouts **inherit** from one another, so a game file lists only what it changes
+and a fix to the base mapping reaches every game at once. See
+[Configuration](#configuration).
 
-- the **throttle screen** (X52 Pro), on the bottom line next to the menu state:
+### A web app for your phone
 
-  ```
-  192.168.1.69       ← Pi IP (enter this in the Oberon app)
-  XBOX:ON    12ms    ← connected + input latency
-  MENU:ON       AC7  ← menu mode  |  active game layout
-  ```
-
-- the **web page** at `http://<pi-ip>:8088`
-- the service log: `journalctl -u hotas-oberon -f`
-
-You can also switch from the web page, or start on a given layout:
-
-```bash
-sudo python3 /opt/hotas-bridge/oberon/oberon_server.py --layout ac7
-```
-
-The choice is remembered across restarts (in `layouts/.active`).
-
----
-
-## The web app
-
-Every board runs a status page and layout editor on **port 8088**, reachable from
-any browser on the same network — phone included, which is the point: you sit at
-the stick with your phone and map it.
+Every board serves a status page and layout editor on port 8088:
 
 ```
 http://<pi-ip>:8088
 ```
 
-Three tabs:
+- **Status** — which game you are on, whether the Xbox is connected, live input
+  latency and where it goes, and a menu-mode switch.
+- **Layouts** — activate, edit, duplicate or delete.
+- **Editor** — bindings as a plain list (`Main trigger → B`), one row per
+  control, per mode-dial layer. Inherited rows are drawn dashed so the whole
+  effective mapping is visible. Axes get sliders instead of number fields.
 
-- **Status** — which game you're on (big, because that's the question you
-  actually have), Oberon connected or not, input latency, uptime, and a
-  menu-mode switch.
-- **Layouts** — activate, edit, duplicate or delete any layout.
-- **Editor** — bindings as a plain list you can read at a glance
-  (`Main trigger → B`), one row per control, per mode-dial layer. Inherited rows
-  are drawn dashed, so you can always see the whole effective mapping and what
-  came from where. Axes get sliders for deadzone and expo rather than typing
-  numbers. There's a raw-JSON view and a resolved preview under Advanced.
+Saving the layout that is currently active re-applies it live — no restart, no
+reconnect. Nothing is written until it validates.
 
-Saving the *active* layout re-applies it live — no restart, no reconnect. Nothing
-is written until it validates.
+> **No password.** Anyone on your LAN can edit layouts, toggle menu mode and
+> briefly pause the controller output. That is deliberate — it is a tool for
+> your own network. Do not port-forward it. `--web-port 0` turns it off.
 
-### Mapping by pressing the thing
+### Mapping a control by pressing it
 
-You don't have to know that the pinkie trigger is `BTN_PINKIE`. Tap **Add a
-button**, and the bridge listens:
+You do not need to know that the pinkie trigger is `BTN_PINKIE`. Tap **Add a
+button** and the bridge listens:
 
 1. Press the button (or sweep the axis) you want to map.
 2. It tells you what you touched — *Pinkie trigger · BTN_PINKIE*.
-3. Pick what it should do on the Xbox from a grid of real controller buttons.
+3. Pick what it does on the Xbox from a grid of real controller buttons.
 
-**Output to the Xbox is paused while it's listening**, so pressing buttons to
-identify them can't fire a shot or scroll the dashboard. Anything you were
-holding is dropped when it stops, so nothing leaks through afterwards.
+**Output to the Xbox is paused while it listens**, so pressing buttons to
+identify them cannot fire a shot or scroll the dashboard, and anything held is
+dropped when it stops.
 
-Pick **more than one** target to press them together — that's how Ace Combat's
-flares (LS + RS) and its high-G turn (LT + RT) are built.
+Pick **more than one** target to press them together — that is how Ace Combat's
+flares (LS + RS) and its high-G turn (LT + RT) are built. Axes also offer *use
+it as buttons*, which walks you through "what should this do one way / the
+other way" — the AC7 twist-as-yaw mapping.
 
-Axes offer one extra path: **use it as buttons**, which walks you through "what
-should this do one way / the other way". That's the AC7 twist-as-yaw mapping,
-and it works for any axis you'd rather have behave like a bumper pair.
+### Menu mode
 
-The same listen-and-learn flow sets the menu-freeze and layout-switch buttons
-under **Setup → Special buttons**.
+A throttle rests wherever you leave it. Mapped to a stick axis, a raised
+throttle reads as a stick held off-centre, which scrolls menus and steers
+radial wheels you are trying to use.
 
-> **No password.** Anyone on your LAN can edit layouts, toggle menu mode and
-> briefly pause the controller output. That's deliberate — it's a tool for your
-> own network. Don't port-forward it. To turn it off entirely, add
-> `--web-port 0` to the service's `ExecStart`.
+The service starts in menu mode, where the throttle is frozen to neutral while
+the flight sticks stay live. Navigate menus, launch your match, then press the
+**E button** to fly. The throttle screen shows `MENU:ON`/`OFF`, the button LEDs
+go **amber** in menu mode and **green** when flying, and the web page has a
+toggle. The freeze follows the layout — including both halves of a split
+throttle.
 
----
+### Throttle display and LEDs (X52 Pro, optional)
 
-## Layouts and inheritance
+Needs [libx52](https://github.com/nirenjan/libx52), which the installer builds
+for you. Without it everything else runs exactly the same.
 
-A layout is one JSON file in `layouts/`. It can **inherit** from another layout
-(nearly always `default`) and override only what differs — so a game layout stays
-short and readable, and a fix to the base mapping reaches every game at once.
+```
+192.168.1.69       ← Pi IP (enter this in the Oberon app)
+XBOX:ON    12ms    ← connected + input latency: stick moved → Xbox has it
+MENU:ON       AC7  ← menu mode + active game layout
+```
+
+| Shows | Means |
+|---|---|
+| `12ms` | your input reached the Xbox 12 ms after you moved the stick |
+| `1.4s` | real lag |
+| `STALL` | connected, but nothing has arrived for over 1.5s |
+| `waiting` | no Oberon client connected |
+
+The screen is deliberately quiet — every character costs a process spawn and a
+USB round-trip — so the figure only moves when it moves meaningfully. The two
+throttle rotaries adjust MFD and button-LED brightness live.
+
+### The shipped layouts
+
+![X52 Pro layout](x52_layout.png)
+
+**Star Wars: Squadrons** — matches the game's default scheme, no rebinding
+needed. This is also the base every other layout inherits.
+
+| Xbox | HOTAS control | Function |
+|---|---|---|
+| Left stick Y | Throttle lever | Throttle (up = forward) |
+| Left stick X | Stick left / right | Roll |
+| Right stick Y | Stick fwd / back | Pitch |
+| Right stick X | Twist | Yaw |
+| RT | Main trigger | Fire |
+| RB / LB | Thumb FIRE / pinkie | Right / left auxiliary |
+| A / B / RS | C / B / A head buttons | Cycle targets / countermeasures / free look |
+| LT / LS | D / i (throttle) | Select target ahead / boost |
+| D-pad | POV hat | Power management |
+
+**Ace Combat 7** — matches the default Xbox scheme (Standard *or* Expert).
+
+| Xbox | HOTAS control | Function |
+|---|---|---|
+| Left stick | Main stick | Pitch + roll |
+| RT / LT | **Throttle lever, split** | Forward = accelerate, back = brake |
+| LB / RB | Twist left / right | Yaw (digital) |
+| B / A | Trigger / thumb FIRE | Missile / machine gun |
+| Y / X / RS | C / B / A head buttons | Change target / weapon / view |
+| LS + RS | Pinkie trigger | **Flares** |
+| LT + RT | D (throttle) | High-G turn |
+
+**Battlefield 6** (aircraft) — matches the **default** Aircraft preset. You do
+not need the in-game "Alternate" preset.
+
+| Xbox | HOTAS control | Function |
+|---|---|---|
+| Left stick Y / X | Throttle lever / twist | Throttle / yaw |
+| Right stick | Main stick | Pitch + roll |
+| RT / LT | Trigger / pinkie | Fire / zoom |
+| LS / RS | i (throttle) / A head | Afterburner / camera |
+| Y / X / A | C / B head, D (throttle) | Switch weapon / reload / switch seat |
+| D-pad | POV hat | Equipment slots |
+
+**MSFS 2024** — throttle on the right trigger as an absolute 0–100% axis. In
+game: *Controls → Throttle → bind THROTTLE AXIS to the right trigger*. This is
+the one layout that uses the mode dial (M1 flight, M2 d-pad, M3 menus).
+
+### Latency
+
+The bridge measures your real input latency — from the moment the stick moved
+to the moment the Xbox has it — and both halves are genuine measurements.
+
+**On this board** comes from the kernel's own timestamp on the input event,
+compared against the moment it goes on the wire. **Trip to the Xbox** is a real
+round trip: the Oberon client polls strictly synchronously with no timer
+([SocketClient.cs][oberon-src]), so the gap between our reply going out and the
+next request landing *is* the round trip, and the input rides the outbound half.
+
+[oberon-src]: https://github.com/SamsidParty/OberonRemote/blob/main/Oberon/SocketClient.cs
+
+Because the client is synchronous, an input waits on average half a round trip
+before it can be sent — so **total input latency is roughly one round trip, and
+the link sets it**. The software barely matters:
+
+| | cost |
+|---|---|
+| everything the bridge does per poll | well under 1 ms |
+| WiFi round trip, clean 5 GHz | 1–3 ms |
+| **WiFi with power save on** | **100–200 ms spikes** |
+
+So, in the order that actually helps:
+
+1. **Turn off WiFi power save** — `sudo tools/wifi_tune.sh`. The installer does
+   this and keeps it off across reboots and reconnects.
+2. **Use 5 GHz**, on a channel your neighbours are not using.
+3. **Or wire the Pi to the router.** The Xbox can stay wireless — removing one
+   of the two radios is most of the win.
+4. **Give the Pi a static lease**, so a DHCP renewal cannot land mid-match.
+
+Watch the **worst in the last 5s** figure on the web page as much as the
+average: a single 200 ms spike is what you feel.
+
+Bandwidth is a non-issue — the whole link runs at about 0.4 Mbps.
+
+## Configuration
+
+### Layout files
+
+A layout is one JSON file in `layouts/`. It can inherit from another and
+override only what differs.
 
 ```json
 {
@@ -194,362 +300,138 @@ Merge rules, child over parent:
 | an object | merges key-by-key, recursively |
 | `null` | **deletes** the inherited key |
 
-So `"BTN_BASE": null` in a mode removes a button the parent had bound, and
+So `"BTN_BASE": null` removes a button the parent bound, and
 `"ABS_RZ": { "target": null, "button_low": "lb" }` turns an inherited analog
 axis into a pair of digital buttons.
 
-**Keys:**
+#### display_name / short_name
 
-- **`display_name`** — full name, shown in the web UI.
-- **`short_name`** — up to 8 characters, shown on the throttle screen.
-- **`order`** — position in the switch-button cycle (ties break by name).
-- **`axes`** — evdev axis name → mapping:
-  - `target` — `lx ly rx ry lt rt`, or `split_lt_rt` (see below), or `null`.
-  - `invert`, `deadzone` (0–1), `expo` (0–1, softens the middle of the throw).
-  - `button_low` / `button_high` — press an Xbox button while the axis is past
-    ∓`button_threshold` (default 0.5). Turns an analog axis into digital
-    buttons — e.g. twist → LB/RB for Ace Combat's yaw.
-- **`buttons`** — `mode1`/`mode2`/`mode3` (the mode dial) → evdev button name →
-  target. A target is `a b x y lb rb ls rs view menu dpad_*`, `lt_button` /
-  `rt_button` for a trigger tap, `select_mode1..3`, or a **list** to press
-  several at once (`["ls", "rs"]` = Ace Combat's flares).
-- **`suspend_button`** — freezes the throttle for menus (see below).
-- **`layout_switch_button`** — cycles layouts.
-- **`throttle_axis`** — which axis the menu freeze applies to (default `ABS_Z`).
-- **`brightness_axis` / `led_brightness_axis`** — throttle rotaries for MFD and
-  LED brightness (`""` disables). Only active while unmapped as a game axis.
-- **`hat_to_dpad`** — POV hat drives the d-pad when true.
+Type: `String`
+Default: the file name
 
-**`split_lt_rt`** splits one lever across both triggers: forward half drives RT,
-back half drives LT, centre is neither. That's how Ace Combat's
-accelerate/brake-on-one-throttle works.
+Full name for the web UI. `short_name` is at most 8 characters and appears on
+the throttle screen.
 
-Find any button or axis code on your unit with:
+#### order
 
-```bash
-sudo python3 /opt/hotas-bridge/oberon/oberon_server.py --probe
-```
+Type: `Number`
+Default: `50`
 
----
+Position in the switch-button cycle. Ties break by name.
 
-## The layouts
+#### axes
 
-### Star Wars: Squadrons
+Type: `Object` — evdev axis name → mapping
 
-Matches the game's **default** control scheme — set the scheme to Default and
-fly, no in-game rebinding. This is also the base layout everything inherits.
+- `target` — `lx ly rx ry lt rt`, `split_lt_rt`, or `null`.
+  `split_lt_rt` puts one lever across both triggers: forward half drives RT,
+  back half LT, centre neither. That is Ace Combat's accelerate/brake.
+- `invert`, `deadzone` (0–1), `expo` (0–1, softens the middle of the throw).
+- `button_low` / `button_high` — press an Xbox button while the axis is past
+  ∓`button_threshold` (default `0.5`), turning an axis into digital buttons.
 
-![X52 Pro layout](x52_layout.png)
+#### buttons
 
-| Xbox | HOTAS control | Squadrons function |
-|------|---------------|--------------------|
-| Left stick Y | Throttle lever | Throttle (up = forward) |
-| Left stick X | Stick left / right | Roll |
-| Right stick Y | Stick fwd / back | Pitch |
-| Right stick X | Twist | Yaw |
-| RT | Main trigger | Fire |
-| RB | Thumb FIRE button | Fire Right Auxiliary |
-| LB | Pinkie trigger | Fire Left Auxiliary |
-| A | C head button | Cycle Targets |
-| B | B head button | Deploy Countermeasures |
-| RS | A head button | Free Look |
-| LT | D button (throttle) | Select Target Ahead |
-| LS | I button (throttle) | Boost |
-| Menu | T1 rocker | Menu |
-| View | T2 rocker | Show Loadout |
-| D-pad | POV hat | Power: up=weapon, left=engine, down=balance, right=shield |
+Type: `Object` — `mode1`/`mode2`/`mode3` (the mode dial) → evdev name → target
 
-The throttle sits on the **left stick**, where it can never fire a weapon.
+A target is `a b x y lb rb ls rs view menu dpad_*`, `lt_button` / `rt_button`
+for a trigger tap, `select_mode1..3`, or a **list** to press several at once
+(`["ls", "rs"]`).
 
-### Ace Combat 7: Skies Unknown
+#### suspend_button / layout_switch_button
 
-Matches AC7's default Xbox scheme (Standard *or* Expert — they share the same
-buttons; only the in-game stick behaviour differs). No rebinding needed.
+Type: `String` (evdev button name)
+Default: `BTN_BASE2` / `BTN_BASE4`
 
-| Xbox | HOTAS control | AC7 function |
-|------|---------------|--------------|
-| Left stick | Main stick | Pitch + roll |
-| RT / LT | **Throttle lever, split** | Forward = accelerate, back = brake |
-| LB / RB | Twist left / right | Yaw left / right (digital) |
-| B | Main trigger | Fire missile / special weapon |
-| A | Thumb FIRE button | Machine gun |
-| Y | C head button | Change target |
-| X | B head button | Change weapon |
-| RS | A head button | Change view |
-| LS + RS | Pinkie trigger | **Flares** (both sticks at once) |
-| LT + RT | D button (throttle) | High-G turn (both triggers) |
-| D-pad | POV hat | Radio replies |
-| Menu / View | T1 rocker | Pause / map |
+The menu/throttle-freeze toggle, and the layout cycler.
 
-The split throttle is the interesting bit: AC7 puts accelerate and brake on
-opposite triggers, so one physical lever drives both — push past centre to
-accelerate, pull back past centre to brake.
+#### throttle_axis / brightness_axis / led_brightness_axis / hat_to_dpad
 
-### Battlefield 6 (aircraft)
+Type: `String` / `String` / `String` / `Boolean`
+Default: `ABS_Z` / `ABS_RY` / `ABS_RX` / `true`
 
-Matches BF6's **default** Aircraft controller preset. You do *not* need the
-in-game "Alternate" preset — that exists to work around a gamepad having too few
-axes, and the HOTAS doesn't have that problem. Leave it on Default.
+Which axis the menu freeze applies to, the two rotaries (`""` disables; only
+active while unmapped as a game axis), and whether the POV hat drives the
+d-pad.
 
-| Xbox | HOTAS control | BF6 function |
-|------|---------------|--------------|
-| Left stick Y | Throttle lever | Throttle |
-| Left stick X | Twist | Yaw |
-| Right stick | Main stick | Pitch + roll (forward = nose down) |
-| RT | Main trigger | Fire |
-| LT | Pinkie trigger | Zoom |
-| LS | I button (throttle) | Afterburner |
-| RS | A head button | Camera / view |
-| Y | C head button | Switch weapon |
-| X | B head button | Reload (hold to exit) |
-| A | D button (throttle) | Switch seat |
-| B | Thumb FIRE button | B |
-| D-pad | POV hat | Equipment slots (countermeasures) |
-| Menu / View | T1 rocker | Pause / scoreboard |
+Find any code on your unit with `sudo python3 oberon/oberon_server.py --probe`,
+or just press it in the web editor.
 
-### MS Flight Simulator 2024
+### Command line
 
-Throttle on the **right trigger** as an absolute 0–100% axis — the closest thing
-to real HOTAS behaviour on a console. In-game: *Controls → Throttle → bind
-THROTTLE AXIS to the right trigger*; do **not** use the incremental
-throttle-up/down bindings, which is what makes a lever feel wrong.
-
-This is also the one layout that uses the **mode dial**: M1 flight buttons,
-M2 a d-pad/systems layer, M3 menus.
-
----
-
-## Latency — measured, not estimated
-
-The bridge measures your real input latency: **from the moment the stick
-physically moved to the moment the Xbox has it.** Both halves are genuine
-measurements, not guesses.
-
-**On this board** comes from the kernel's own timestamp on the input event —
-the instant the hardware reported the movement, before any of this code ran —
-compared against the moment that input goes out on the wire. It's mostly the
-wait for the Xbox to ask for the next packet.
-
-**Trip to the Xbox** is a real round trip. The Oberon client's loop is strictly
-synchronous — send, wait for the reply, inject, send again, with no timer at
-all ([SocketClient.cs][oberon-src]) — so the gap between our reply going out
-and the next request landing *is* the round trip. The input rides the outbound
-half of it.
-
-[oberon-src]: https://github.com/SamsidParty/OberonRemote/blob/main/Oberon/SocketClient.cs
-
-Because the client is synchronous, an input waits on average half a round trip
-before it can even be sent — so **total input latency lands at roughly one
-round trip**, and the link is what sets it. Which is why the software side
-barely matters:
-
-| | cost |
-|---|---|
-| build the controller packet | ~18 µs |
-| read the shared state | ~3 µs |
-| **everything the bridge does** | **well under 1 ms** |
-| WiFi round trip, clean 5 GHz | 1–3 ms |
-| **WiFi with power save on** | **100–200 ms spikes** |
-
-Power save parks the radio between beacons. That's invisible on a web page and
-ruinous for a flight stick, and it's usually **on by default**. The installer
-now turns it off and keeps it off across reboots and reconnects. To check or
-re-apply by hand:
-
-```bash
-sudo /opt/hotas-bridge/tools/wifi_tune.sh --status   # what's the link doing?
-sudo /opt/hotas-bridge/tools/wifi_tune.sh            # fix it, and on every boot
-```
-
-After that, in the order that actually helps:
-
-1. **Put the Pi on 5 GHz**, on a channel your neighbours aren't using. 2.4 GHz
-   shares the air with every doorbell and microwave nearby.
-2. **Or wire the Pi to the router.** The Xbox can stay wireless — removing one
-   of the two radios is most of the win.
-3. **Give the Pi a static lease**, so a DHCP renewal can't land mid-match.
-
-You can see all of this working on the throttle screen and the web page. Change
-one thing at a time and watch the numbers move — and watch the **worst in the
-last 5s** figure as much as the average, because a single 200 ms spike mid-turn
-is what you actually feel.
-
-The throttle-screen thread runs at a lower priority than the input path, so
-its display updates can never outrank your controls. Beyond that the poll
-loop is kept deliberately bare: it does the measurement arithmetic and
-nothing else, and publishes status to the screen and the web page ten times
-a second rather than on every one of the several hundred polls.
-
-**Bandwidth is a non-issue** — the whole link runs at about 0.4 Mbps. There is
-nothing to save there, so the bridge spends its effort on *consistency*:
-WebSocket compression is off, because 9 bytes and 100 bytes occupy the same
-radio frame and compressing every packet only adds work on the critical path.
-
-There is also a `--dscp` flag, which marks packets DSCP EF / priority 6 to
-claim a high-priority WiFi queue. It is **off by default** on purpose: access
-points differ, and some apply admission control to the voice class and
-downgrade or police what they see, which can make a link worse. If you want
-to try it, add it to the service's `ExecStart` and watch the numbers on the
-web page before and after.
-
----
-
-## Menu mode (why the throttle doesn't wreck menus)
-
-A throttle rests wherever you leave it — it never re-centers. Mapped to a stick
-axis, a raised throttle reads as a stick held off-center, which scrolls menus
-and steers radial wheels you're trying to use.
-
-**The fix is built in.** The service starts in *menu mode*, where the throttle
-is frozen to neutral while the flight sticks stay live. Navigate menus, launch
-your match, then press the **E button** once to unfreeze and fly. Press it again
-whenever you're back in a menu. The throttle screen shows `MENU:ON`/`OFF`, the
-web page shows it with a toggle, and the button LEDs turn **amber** in menu mode,
-**green** when flying.
-
-The freeze follows the layout: it always freezes whatever that layout put the
-throttle lever on, including both halves of a `split_lt_rt` throttle.
-
----
-
-## Throttle display & LEDs (X52 Pro, optional)
-
-The X52 Pro's throttle screen can show live bridge status, and the button LEDs
-can reflect state. This needs the **libx52** driver
-(https://github.com/nirenjan/libx52), which the installer sets up for you.
-
-```
-192.168.1.69       ← Pi IP (enter this in the Oberon app)
-XBOX:ON    12ms    ← connected + input latency: stick moved → Xbox has it
-MENU:ON       AC7  ← menu mode + active game layout
-```
-
-The screen is deliberately quiet. Every character written costs a process
-spawn and a USB round-trip, so the latency figure only moves when it moves
-*meaningfully* — a link jittering around 1.8 ms redraws roughly three times a
-minute rather than twice a second, while a real jump to 45 ms shows up at
-once. The live, unfiltered numbers are on the web page.
-
-The latency line tells the truth when the link degrades — that's the point:
-
-| Shows | Means |
-|---|---|
-| `12ms` | your input reached the Xbox 12 ms after you moved the stick |
-| `1.4s` | real lag |
-| `STALL` | connected, but nothing has arrived for over 1.5s |
-| `waiting` | no Oberon client connected |
-
-The web page shows the same figure live, plus the split between time spent on
-the board and the trip to the Xbox, and the worst reading in the last five
-seconds — which is what actually ruins a turn.
-
-- **Button LEDs:** green while flying, amber in menu mode. (The X52 Pro's FIRE
-  and THROTTLE LEDs are on/off only — hardware limitation — so those don't
-  change color; the A/B/D/E/T LEDs do.)
-- **Brightness knobs:** the two throttle rotaries adjust MFD brightness (upper)
-  and button-LED brightness (lower), live.
-- The MFD backlight is green by hardware; you can't change its color, only its
-  brightness.
-
-**On Armbian / Debian / arm64** the Ubuntu PPA has no package, so the installer
-builds libx52 from source automatically. To do it by hand:
-
-```bash
-sudo /opt/hotas-bridge/oberon/build_libx52.sh
-sudo systemctl restart hotas-oberon
-```
-
-> Don't add the Ubuntu PPA to a Debian/Armbian `sources.list` — it can break
-> apt. Build from source instead (the script above does exactly that).
-
-Everything here is optional: if libx52 isn't installed, the bridge runs exactly
-the same without the display, LEDs, or brightness knobs — the web page still
-shows all the same status.
-
----
-
-## Making your own layout
-
-Easiest path: open `http://<pi-ip>:8088` on your phone, hit **Duplicate** on
-whichever layout is closest, then map controls by pressing them (see above).
-**Save**. If you're editing the layout that's currently active, it re-applies
-immediately — no restart.
-
-By hand, drop a file in `layouts/`:
-
-```json
-{
-  "display_name": "Elite Dangerous",
-  "short_name": "ELITE",
-  "inherits": "default",
-  "order": 50,
-  "axes": { "ABS_Z": { "target": "rt" } },
-  "buttons": { "mode1": { "BTN_TRIGGER": "a" } }
-}
-```
-
-Then restart, or hit the switch button until it comes round.
-
-**Keep your changes in your own layout, not in the shipped ones.** `install.sh`
-refreshes the layouts that ship with this repo on every upgrade (it backs the
-whole folder up to `layouts-backup-<timestamp>.tgz` first, and never touches
-layouts you created).
-
----
+| Flag | Default | What it does |
+|---|---|---|
+| `--layout NAME` | last active | Layout to start on |
+| `--layouts-dir DIR` | `../layouts` | Where layouts live |
+| `--config FILE` | — | Legacy single-config mode; layout switching off |
+| `--menu` | off | Start with the throttle frozen (the service uses this) |
+| `--web-port N` | `8088` | Web app port; `0` disables it |
+| `--port N` | `26401` | Oberon protocol port |
+| `--device PATH` | auto | `/dev/input/eventX` instead of matching by name |
+| `--dscp` | off | Mark packets DSCP EF / priority 6 to claim a high-priority WiFi queue. Helps on some APs, hurts on others — measure it |
+| `--list` / `--probe` | — | List devices / print live event names |
+| `--verbose` | off | Log state on every poll. Do not leave it on while playing |
 
 ## Troubleshooting
 
-**Menu cursor drifts / throttle scrolls the dashboard.** You're not in menu
-mode. Start the service (it boots in menu mode), press the E button, or hit the
-toggle on the web page.
+**Menu cursor drifts / throttle scrolls the dashboard.** You are not in menu
+mode. Press the E button, or use the toggle on the web page.
 
-**A control does the wrong thing.** Your stick's codes may not match the layout.
-Open the web editor, tap **Add a button**, and press the control — it'll tell you
-what your unit actually calls it, and you can bind it right there.
+**Input feels laggy or stutters.** Check the link first:
+`sudo /opt/hotas-bridge/tools/wifi_tune.sh --status`. If power save is on, run
+the script without `--status`. See [Latency](#latency).
 
-**Pitch is backwards.** Open the axis in the web editor and flip **Invert** — it
-applies live on save. Which way is "correct" depends on the game and on your
-unit, so it's deliberately not guessed for you; it's one tap either way.
+**A control does the wrong thing.** Your stick's codes may not match the
+layout. Open the web editor, tap **Add a button**, and press the control — it
+tells you what your unit calls it and you can bind it there.
 
-**I don't know which layout I'm on.** Look at the throttle screen's bottom line,
-or the web page, or `journalctl -u hotas-oberon -f` (it logs every switch).
+**Pitch is backwards.** Flip **Invert** on that axis in the editor; it applies
+live on save. Which way is correct depends on the game and your unit, so it is
+deliberately not guessed.
 
-**The switch button does nothing.** That layout has no `layout_switch_button`,
-or the name doesn't match your unit. Check it with `--probe`, then set it in the
-web editor. Note the button is read from the *active* layout, so if you switch
-into a layout that lacks it, you'll have to switch back from the web page.
+**The switch button does nothing.** That layout has no
+`layout_switch_button`, or the name does not match your unit. It is read from
+the *active* layout, so if you switch into one that lacks it you will need the
+web page to get back.
 
-**Web page won't load.** Check the service is up (`systemctl status
-hotas-oberon`) and that you're on the same network. The startup log prints the
-exact URL. Port 8088 by default.
+**Xbox will not connect.** Pi and Xbox must share a network. Re-enter the IP.
+Check the service: `systemctl status hotas-oberon`.
 
-**Xbox won't connect.** Pi and Xbox must share a network. Re-enter the Pi's IP
-in Oberon. Check the server: `systemctl status hotas-oberon`.
+**The throttle screen stays blank.** libx52 is not built, or `x52cli` is not on
+PATH. Test with `sudo x52cli mfd 0 "TEST"`; if that errors, run
+`sudo /opt/hotas-bridge/oberon/build_libx52.sh` and replug the stick.
 
-**Input feels laggy or stutters.** Check the link first — it's almost always
-WiFi power save: `sudo /opt/hotas-bridge/tools/wifi_tune.sh --status`. If it
-says power save is on, run the same script without `--status`. See
-[Latency](#latency--where-it-actually-comes-from) for what to try next.
+**Watch what is happening:** `journalctl -u hotas-oberon -f` logs layout
+switches, mode switches, menu toggles and connection state.
 
-**Watch what's happening live:** `journalctl -u hotas-oberon -f` shows layout
-switches, mode switches, menu toggles, and connection state. Add `--verbose` to
-a manual run to see axis values on every poll.
+## Contributing
 
-**The display stays blank.** libx52 isn't built or `x52cli` isn't on PATH. Test
-directly: `sudo x52cli mfd 0 "TEST"`. If that errors, run `build_libx52.sh` and
-replug the stick to apply the udev rule.
+PRs and issues are welcome. Fork the repository and use a feature branch.
 
----
+Layouts are the easiest place to help: a good mapping for a game that is not
+here is a single small JSON file. Keep it inheriting from `default` so it stays
+readable.
 
-## Running one fixed config (the old way)
+If you change the server, please keep the input path clean — nothing that
+blocks (files, subprocesses, synchronous logging) belongs in the evdev reader
+or the poll response. The commit history has some cautionary tales.
 
-Layouts replaced the single `sender/sender_config.json`, but that path still
-works — pass `--config` and layout switching turns off:
+## Links
 
-```bash
-sudo python3 /opt/hotas-bridge/oberon/oberon_server.py \
-    --config /opt/hotas-bridge/sender/sender_config.json --menu
-```
+- Repository: https://github.com/koubry02/x52-xbox-bridge
+- Issue tracker: https://github.com/koubry02/x52-xbox-bridge/issues
+- Related projects:
+  - [OberonRemote](https://github.com/SamsidParty/OberonRemote) — the Xbox-side
+    app this talks to, and the source of the protocol
+  - [libx52](https://github.com/nirenjan/libx52) — drives the X52 Pro's screen
+    and LEDs
 
-This is what `calibrate.py` writes to, so it's a good way to run a freshly
-calibrated config before folding your calibration into a layout.
+## Licensing
+
+No licence has been declared for this repository, so default copyright applies
+and reuse rights are not granted. If you intend others to use it, adding a
+`LICENSE` file would settle that — MIT is the usual choice for something like
+this.
+
+`proxy/`, `receiver/`, `sender/` and `overlays/` belong to an alternative
+USB-hardware mode and are not used by the Oberon setup described here.
