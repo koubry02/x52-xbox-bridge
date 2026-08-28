@@ -317,6 +317,11 @@ class CaptureService:
             self._result = None
 
     def armed(self):
+        # Checked on every poll and every evdev event, so take the cheap exit
+        # first — an unarmed capture is the overwhelmingly common case, and the
+        # flag alone answers it without touching the lock.
+        if not self._armed:
+            return False
         with self._lock:
             return self._armed and time.monotonic() < self._deadline
 
@@ -611,7 +616,7 @@ class LayoutManager:
         except (OSError, ValueError, json.JSONDecodeError) as e:
             return False, f"layout '{name}': {e}"
         self._apply(m, persist=persist)
-        print(f"[layout] active: {m.display_name} ({name})", flush=True)
+        print(f"[layout] active: {m.display_name} ({name})")
         return True, None
 
     def cycle(self):
@@ -625,7 +630,7 @@ class LayoutManager:
         idx = (order.index(cur) + 1) % len(order) if cur in order else 0
         ok, err = self.activate(order[idx])
         if not ok:
-            print(f"[layout] switch failed: {err}", flush=True)
+            print(f"[layout] switch failed: {err}")
 
     def _apply(self, m, persist):
         with self._lock:
@@ -736,8 +741,10 @@ def evdev_reader(dev, mgr, state, telemetry, verbose=False, capture=None,
                 elif ev.type == ecodes.EV_KEY:
                     if m.suspend_code is not None and ev.code == m.suspend_code and ev.value == 1:
                         suspended = state.toggle_suspended()   # applied at poll time
-                        print(f"[menu] {'THROTTLE FROZEN (menu/radial safe)' if suspended else 'LIVE (flying)'}",
-                              flush=True)
+                        # No flush=True: this runs in the reader thread, and a
+                        # synchronous write into journald's pipe would stall the
+                        # stick at exactly the moment you press the button.
+                        print(f"[menu] {'THROTTLE FROZEN (menu/radial safe)' if suspended else 'LIVE (flying)'}")
                         telemetry.set_menu(suspended)
                         if not suspended:
                             # Resuming: drop any buttons currently held (the pinkie
@@ -755,7 +762,7 @@ def evdev_reader(dev, mgr, state, telemetry, verbose=False, capture=None,
                         if new_mode != mode:
                             mode = new_mode
                             btn_dirty = True
-                            print(f"[mode] switched to M{mode}", flush=True)
+                            print(f"[mode] switched to M{mode}")
                     elif ev.value:
                         if ev.code not in pressed:
                             pressed.add(ev.code)
@@ -1005,7 +1012,10 @@ def main():
                     help=f"status/editor web app port (default {WEB_PORT}, 0 = off)")
     ap.add_argument("--list",    action="store_true", help="list input devices and exit")
     ap.add_argument("--probe",   action="store_true", help="print live events and exit")
-    ap.add_argument("--verbose", action="store_true")
+    ap.add_argument("--verbose", action="store_true",
+                    help="print controller state on every poll. Useful for "
+                         "debugging, but it formats and logs a line hundreds "
+                         "of times a second — don't leave it on while playing")
     ap.add_argument("--dscp", action="store_true",
                     help="mark packets DSCP EF / priority 6 to claim a "
                          "high-priority WiFi queue. Helps on some access "

@@ -149,6 +149,11 @@ class MFDStatus:
         self._ping_ms = None
         self._ping_at = None   # when the last poll landed, for stall detection
         self._shown_ping = None  # the figure currently on the glass
+        # Wanted brightness, applied by the refresh thread. These used to be
+        # written straight from the evdev reader, which meant turning a knob
+        # forked a process and waited on USB *in the thread reading the stick*.
+        self._want_bri = None
+        self._want_led_bri = None
         # Set by anything the user is waiting to see, so the refresh loop
         # redraws now instead of on its next tick.
         self._wake = threading.Event()
@@ -206,12 +211,18 @@ class MFDStatus:
             self._wake.set()
 
     def set_mfd_brightness(self, level_0_128):
-        """Live MFD brightness from the throttle knob (0..128)."""
-        set_mfd_brightness(level_0_128)
+        """Ask for a new MFD brightness. Records it and wakes the refresh
+        thread — the x52cli call happens there, never in the caller, because
+        the caller is the thread reading your stick."""
+        with self._lock:
+            self._want_bri = max(0, min(128, int(level_0_128)))
+        self._wake.set()
 
     def set_led_brightness(self, level_0_128):
-        """Live button-LED brightness from the throttle knob (0..128)."""
-        set_led_brightness(level_0_128)
+        """Same, for the button-LED brightness knob."""
+        with self._lock:
+            self._want_led_bri = max(0, min(128, int(level_0_128)))
+        self._wake.set()
 
     def stop(self):
         self._stop = True
@@ -283,6 +294,7 @@ class MFDStatus:
 
         period = 1.0 / max(0.5, hz)
         drawn = [None, None, None]      # what's actually on each line
+        done_bri = done_led_bri = None  # brightness actually pushed to the stick
         while not self._stop:
             lines = self._render()
             # Write only the lines that changed. Every _set_line is a process
@@ -300,6 +312,15 @@ class MFDStatus:
             if want_led != self._last_led:
                 set_all_leds(want_led)
                 self._last_led = want_led
+            # Brightness the knobs asked for, applied here where a blocked
+            # USB round-trip costs nothing but a late redraw.
+            with self._lock:
+                bri, led_bri = self._want_bri, self._want_led_bri
+                self._want_bri = self._want_led_bri = None
+            if bri is not None and bri != done_bri:
+                set_mfd_brightness(bri); done_bri = bri
+            if led_bri is not None and led_bri != done_led_bri:
+                set_led_brightness(led_bri); done_led_bri = led_bri
             # Wait for the next tick OR for something to actually change.
             # Toggling menu mode used to sit here for up to half a second
             # before the screen and the LEDs caught up, which read as the

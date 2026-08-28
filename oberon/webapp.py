@@ -230,6 +230,18 @@ def start(port, hub, mgr, state, telemetry, capture=None):
                     for e in layouts_mod.summaries(mgr.layouts_dir)]
 
     httpd = ThreadingHTTPServer(("0.0.0.0", port), Handler)
-    t = threading.Thread(target=httpd.serve_forever, daemon=True)
+
+    def serve():
+        # The service runs at Nice=-10 so the stick beats everything else, but
+        # that applies to every thread — including this one and the per-request
+        # threads it spawns, which inherit its nice value. Serving a status
+        # page must never compete with the input path.
+        try:
+            os.setpriority(os.PRIO_PROCESS, threading.get_native_id(), 10)
+        except (OSError, AttributeError, ValueError):
+            pass
+        httpd.serve_forever()
+
+    t = threading.Thread(target=serve, daemon=True)
     t.start()
     return t
